@@ -107,11 +107,12 @@ public:
         }
         // Publish the exclusion before the code so a failed exclusion cannot leak it to history.
         const bool copied = EmptyClipboard() && privacy.Publish(exclusion) && text.Publish(CF_UNICODETEXT);
+        CloseClipboard();
         if (copied) {
+            // Windows may finalize formats and advance the sequence number when the clipboard is closed.
             sequence_ = GetClipboardSequenceNumber();
             expires_ = GetTickCount64() + lifetime;
         }
-        CloseClipboard();
         return copied;
     }
 
