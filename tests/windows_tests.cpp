@@ -405,6 +405,9 @@ void CALLBACK TestEmptyFlyout(HWND, UINT, UINT_PTR timer, DWORD) {
         ShowWindow(window, SW_HIDE);
         SendMessageW(window, twofa::kShowStandaloneFlyout, 0, 0);
         activeTrayTest->passed = IsWindowVisible(window);
+        if (!activeTrayTest->passed) {
+            std::fputs("The standalone launch message did not reopen the hidden flyout.\n", stderr);
+        }
     }
     SetEvent(activeTrayTest->stop);
 }

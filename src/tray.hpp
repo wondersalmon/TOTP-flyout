@@ -878,6 +878,8 @@ private:
                     if (!handlingCommand_ && !previewVisible_ && !movingWindow_) {
                         DismissFlyout();
                     }
+                } else {
+                    previewVisible_ = false;
                 }
                 return 0;
             case WM_KEYDOWN:
@@ -1708,10 +1710,11 @@ private:
         }
         lastActivity_ = GetTickCount64();
         UpdateCountdown();
-        ShowWindow(window_, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
-        if (activate) {
+        // Keep the panel visible even when Windows denies the foreground request.
+        previewVisible_ = true;
+        ShowWindow(window_, SW_SHOWNOACTIVATE);
+        if (activate && (SetForegroundWindow(window_) || GetForegroundWindow() == window_)) {
             previewVisible_ = false;
-            SetForegroundWindow(window_);
             if (!wasVisible || !IsChild(window_, GetFocus())) {
                 SetFocus(accounts_.empty() ? importButton_ : editing_ ? tagFilter_ : accountList_);
             }
