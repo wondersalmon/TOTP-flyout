@@ -402,11 +402,25 @@ void CALLBACK TestEmptyFlyout(HWND, UINT, UINT_PTR timer, DWORD) {
         std::fputs("The empty flyout did not expose its import button and empty account list.\n", stderr);
     }
     if (activeTrayTest->passed && activeTrayTest->standalone) {
+        SendMessageW(window, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK, 0);
         ShowWindow(window, SW_HIDE);
         SendMessageW(window, twofa::kShowStandaloneFlyout, 0, 0);
         activeTrayTest->passed = IsWindowVisible(window);
         if (!activeTrayTest->passed) {
             std::fputs("The standalone launch message did not reopen the hidden flyout.\n", stderr);
+        }
+    }
+    if (activeTrayTest->passed) {
+        SendMessageW(window, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK, 0);
+        ShowWindow(window, SW_HIDE);
+        SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONUP);
+        const auto opened = IsWindowVisible(window);
+        SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONUP);
+        const auto hidden = !IsWindowVisible(window);
+        SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONUP);
+        activeTrayTest->passed = opened && hidden && IsWindowVisible(window);
+        if (!activeTrayTest->passed) {
+            std::fputs("Successive tray clicks did not open, hide, and reopen the flyout.\n", stderr);
         }
     }
     SetEvent(activeTrayTest->stop);
@@ -415,6 +429,12 @@ void CALLBACK TestEmptyFlyout(HWND, UINT, UINT_PTR timer, DWORD) {
 void CALLBACK TestRowCopy(HWND, UINT, UINT_PTR timer, DWORD) {
     KillTimer(nullptr, timer);
     const auto window = FindTestFlyout();
+    if (window) {
+        SendMessageW(window, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK, 0);
+        if (!IsWindowVisible(window)) {
+            SendMessageW(window, WM_APP + 1, 0, NIN_KEYSELECT);
+        }
+    }
     const auto button = window ? GetDlgItem(window, 108) : nullptr;
     if (button && !IsWindowEnabled(button)) {
         std::puts("Skipped provider-row UI checks because session notifications are unavailable.");
@@ -430,6 +450,12 @@ void CALLBACK TestRowCopy(HWND, UINT, UINT_PTR timer, DWORD) {
 void CALLBACK ExerciseVaultLock(HWND, UINT, UINT_PTR timer, DWORD) {
     KillTimer(nullptr, timer);
     const auto window = FindTestFlyout();
+    if (window) {
+        SendMessageW(window, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK, 0);
+        if (!IsWindowVisible(window)) {
+            SendMessageW(window, twofa::kShowStandaloneFlyout, 0, 0);
+        }
+    }
     const auto button = window ? GetDlgItem(window, 108) : nullptr;
     const auto accounts = window ? GetDlgItem(window, 102) : nullptr;
     if (button && accounts && !IsWindowEnabled(button)) {

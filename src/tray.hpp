@@ -875,7 +875,7 @@ private:
             case WM_ACTIVATE:
                 if (LOWORD(wparam) == WA_INACTIVE) {
                     SetHotButton(nullptr);
-                    if (!handlingCommand_ && !previewVisible_ && !movingWindow_) {
+                    if (!handlingCommand_ && !previewVisible_ && !movingWindow_ && !CursorOverTrayIcon()) {
                         DismissFlyout();
                     }
                 } else {
@@ -949,7 +949,13 @@ private:
                     case NIN_SELECT:
                     case NIN_KEYSELECT:
                     case WM_LBUTTONUP:
-                        ShowFlyout();
+                        if (!handlingCommand_ && sessionAvailable_) {
+                            if (IsWindowVisible(window_) && motion_ != Motion::Leaving) {
+                                HideFlyout();
+                            } else {
+                                ShowFlyout();
+                            }
+                        }
                         break;
                     case WM_CONTEXTMENU:
                     case WM_RBUTTONUP:
@@ -1542,18 +1548,34 @@ private:
         }
     }
 
-    RECT IconRect() const {
+    std::optional<RECT> TrayIconRect() const {
         NOTIFYICONIDENTIFIER icon{};
         icon.cbSize = sizeof(icon);
         icon.hWnd = window_;
         icon.uID = kIconId;
         RECT rect{};
-        if (FAILED(Shell_NotifyIconGetRect(&icon, &rect))) {
-            POINT cursor{};
-            GetCursorPos(&cursor);
-            rect = {cursor.x, cursor.y, cursor.x + 1, cursor.y + 1};
+        if (SUCCEEDED(Shell_NotifyIconGetRect(&icon, &rect))) {
+            return rect;
         }
-        return rect;
+        return std::nullopt;
+    }
+
+    bool CursorOverTrayIcon() const {
+        if (!trayIconAdded_) {
+            return false;
+        }
+        const auto rect = TrayIconRect();
+        POINT cursor{};
+        return rect && GetCursorPos(&cursor) && PtInRect(&*rect, cursor);
+    }
+
+    RECT IconRect() const {
+        if (const auto rect = TrayIconRect()) {
+            return *rect;
+        }
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        return {cursor.x, cursor.y, cursor.x + 1, cursor.y + 1};
     }
 
     PCWSTR PlacementPreference() const { return standalone_ ? L"WindowPlacement" : L"ModWindowPlacement"; }
