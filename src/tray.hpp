@@ -23,6 +23,7 @@ inline PCWSTR TrayWindowClass(bool standalone) {
 }
 
 inline constexpr UINT kShowStandaloneFlyout = WM_APP + 2;
+using UpdateCheck = void (*)(HWND, bool manual);
 
 // Coordinates are relative to the monitor work area in 96-DPI units.
 struct ManualWindowPosition {
@@ -53,7 +54,7 @@ inline POINT CornerFlyoutPosition(WindowPlacementMode mode, SIZE size, const REC
 class TrayFlyout {
 public:
     TrayFlyout(bool standalone, const std::atomic<FlyoutPreferences>* modPreferences, std::wstring vaultPath,
-               void (*checkUpdates)(HWND))
+               UpdateCheck checkUpdates)
         : standalone_(standalone),
           checkUpdates_(checkUpdates),
           modPreferences_(modPreferences),
@@ -82,6 +83,10 @@ public:
         int result = 1;
         if (window) {
             AddIcon();
+            if (checkUpdates_) {
+                automaticUpdateChecks_ = ReadPreference(L"DisableUpdateChecks", 0) == 0;
+                ScheduleUpdateCheck();
+            }
             if (showOnLaunch) {
                 previewVisible_ = true;
                 ShowWindow(window_, SW_HIDE);
@@ -107,6 +112,9 @@ private:
     static constexpr UINT_PTR kDragScrollTimer = 7;
     static constexpr UINT_PTR kFeedbackTimer = 8;
     static constexpr UINT_PTR kHideAfterCopyTimer = 9;
+    static constexpr UINT_PTR kUpdateCheckTimer = 10;
+    static constexpr UINT kFirstUpdateCheckMs = 15000;
+    static constexpr UINT kUpdateCheckIntervalMs = 12 * 60 * 60 * 1000;
     static constexpr UINT kHideAfterCopyMs = 500;
     static constexpr ULONGLONG kEnterDurationMs = 167;
     static constexpr ULONGLONG kExitDurationMs = 167;
@@ -127,6 +135,8 @@ private:
     static constexpr UINT kBackupSettings = 3;
     static constexpr UINT kPositionSettings = 4;
     static constexpr UINT kManageSettings = 5;
+    static constexpr UINT kAutomaticUpdates = 6;
+    static constexpr UINT kManualUpdateCheck = 7;
     static constexpr UINT kImportButton = 108;
     static constexpr UINT kEditButton = 109;
     static constexpr UINT kAccountScroll = 110;
@@ -921,6 +931,9 @@ private:
                     if (preferences_.hideAfterCopy && !handlingCommand_) {
                         DismissFlyout();
                     }
+                } else if (wparam == kUpdateCheckTimer && checkUpdates_ && automaticUpdateChecks_) {
+                    SetTimer(window_, kUpdateCheckTimer, kUpdateCheckIntervalMs, nullptr);
+                    checkUpdates_(window_, false);
                 }
                 return 0;
             case WM_WTSSESSION_CHANGE:
@@ -983,6 +996,7 @@ private:
                 KillTimer(window_, kDragScrollTimer);
                 KillTimer(window_, kFeedbackTimer);
                 KillTimer(window_, kHideAfterCopyTimer);
+                KillTimer(window_, kUpdateCheckTimer);
                 clipboard_.Clear(window_, true);
                 if (sessionNotifications_) {
                     WTSUnRegisterSessionNotification(window_);
@@ -1861,7 +1875,7 @@ private:
             ShowFlyout();
             ShowSettings();
         } else if (command == kTrayCheckUpdates && checkUpdates_) {
-            checkUpdates_(window_);
+            checkUpdates_(window_, true);
         }
         if (command == kExit) {
             SendMessageW(window_, WM_CLOSE, 0, 0);
@@ -2264,6 +2278,14 @@ private:
         }
     }
 
+    void ScheduleUpdateCheck() {
+        if (automaticUpdateChecks_) {
+            SetTimer(window_, kUpdateCheckTimer, kFirstUpdateCheckMs, nullptr);
+        } else {
+            KillTimer(window_, kUpdateCheckTimer);
+        }
+    }
+
     void ShowSettings() {
         if (handlingCommand_) {
             return;
@@ -2284,6 +2306,12 @@ private:
         menu.Add(kShortcutSettings, L"Shortcut...", MFS_ENABLED, false, L"\ue765");
         menu.Add(kBackupSettings, L"Backup...", MFS_ENABLED, false, L"\ue8b7");
         menu.Add(kPositionSettings, L"Window position...", MFS_ENABLED, false, L"\ue922");
+        if (checkUpdates_) {
+            menu.Separator();
+            menu.Add(kAutomaticUpdates, L"Check for updates automatically",
+                     automaticUpdateChecks_ ? MFS_CHECKED : MFS_ENABLED);
+            menu.Add(kManualUpdateCheck, L"Check for updates...");
+        }
         RECT bounds{};
         GetWindowRect(settings_, &bounds);
         const auto action = TrackMenu(menu, {bounds.left, bounds.bottom}, &bounds);
@@ -2303,6 +2331,14 @@ private:
                 case kShortcutSettings: ShowShortcut(); break;
                 case kBackupSettings: ShowBackup(); break;
                 case kPositionSettings: ShowPositionSettings(); break;
+                case kAutomaticUpdates:
+                    automaticUpdateChecks_ = !automaticUpdateChecks_;
+                    ScheduleUpdateCheck();
+                    if (!WritePreference(L"DisableUpdateChecks", !automaticUpdateChecks_)) {
+                        SetNote(L"Some settings apply to this session only.");
+                    }
+                    break;
+                case kManualUpdateCheck: checkUpdates_(window_, true); break;
                 default: HandleAccountCommand(action); break;
             }
         }
@@ -2968,7 +3004,8 @@ private:
     }
 
     bool standalone_;
-    void (*checkUpdates_)(HWND);
+    UpdateCheck checkUpdates_;
+    bool automaticUpdateChecks_ = true;
     const std::atomic<FlyoutPreferences>* modPreferences_;
     FlyoutPreferences preferences_;
     HotkeyPreferences shortcut_;
@@ -3063,7 +3100,7 @@ private:
 
 inline int RunTray(bool standalone, HANDLE stopEvent = nullptr, bool showOnLaunch = false,
                    const std::atomic<FlyoutPreferences>* modPreferences = nullptr,
-                   std::optional<std::wstring> vaultPath = std::nullopt, void (*checkUpdates)(HWND) = nullptr) {
+                   std::optional<std::wstring> vaultPath = std::nullopt, UpdateCheck checkUpdates = nullptr) {
     return TrayFlyout(standalone, modPreferences, vaultPath ? std::move(*vaultPath) : LocalVaultPath(standalone),
                       checkUpdates)
         .Run(stopEvent, showOnLaunch);

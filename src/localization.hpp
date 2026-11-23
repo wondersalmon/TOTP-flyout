@@ -180,6 +180,8 @@ inline std::wstring_view UiText(std::wstring_view text) {
         {L"Could not complete the update. Check your connection and try again.",
          L"Не удалось завершить обновление. Проверьте подключение и попробуйте ещё раз."},
         {L"Check for updates...", L"Проверить обновления…"},
+        {L"Check for updates automatically", L"Проверять обновления автоматически"},
+        {L"An update check is already running.", L"Проверка обновлений уже запущена."},
         {L"TOTP flyout is up to date.", L"Установлена актуальная версия TOTP flyout."},
         {L"Download and install the available update? TOTP flyout will restart.", L"Скачать и установить обновление? TOTP flyout перезапустится."},
     };

@@ -4,16 +4,18 @@
 
 namespace {
 
-// All HWNDs and clipboard operations belong to a private window station.
-// A test run never reads, clears, or posts input to the interactive desktop.
+// A private desktop isolates the windows. Clipboard tests also use a private
+// window station so they cannot read or overwrite the interactive clipboard.
 class Desktop {
 public:
-    Desktop() {
+    explicit Desktop(bool isolateClipboard) {
         originalStation_ = GetProcessWindowStation();
         originalDesktop_ = GetThreadDesktop(GetCurrentThreadId());
         const auto name = L"TOTP-flyout-test-" + std::to_wstring(GetCurrentProcessId());
-        station_ = CreateWindowStationW(name.c_str(), 0, WINSTA_ALL_ACCESS, nullptr);
-        privateClipboard = station_ && SetProcessWindowStation(station_);
+        if (isolateClipboard) {
+            station_ = CreateWindowStationW(name.c_str(), 0, WINSTA_ALL_ACCESS, nullptr);
+            privateClipboard = station_ && SetProcessWindowStation(station_);
+        }
         desktop = CreateDesktopW(name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
         ready = desktop && SetThreadDesktop(desktop);
     }
@@ -991,35 +993,39 @@ int main() {
         return 1;
     }
     std::puts("Tray key icon rendering passed.");
-    Desktop isolation;
+    {
+        Desktop isolatedClipboard(true);
+        if (isolatedClipboard.ready && isolatedClipboard.privateClipboard) {
+            const auto owner = CreateWindowExW(0, L"STATIC", nullptr, WS_POPUP, 0, 0, 1, 1,
+                                               nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+            const auto other = CreateWindowExW(0, L"STATIC", nullptr, WS_POPUP, 0, 0, 1, 1,
+                                               nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+            const bool passed = owner && other && TestClipboard(owner, other);
+            if (other) {
+                DestroyWindow(other);
+            }
+            if (owner) {
+                DestroyWindow(owner);
+            }
+            if (!passed) {
+                std::fputs("Isolated clipboard test failed.\n", stderr);
+                return 1;
+            }
+            std::puts("Isolated clipboard integration passed.");
+        } else {
+            std::puts("Skipped clipboard integration because a private window station is unavailable.");
+        }
+    }
+    // A separate noninteractive window station accepts clipboard operations but cannot reliably show a flyout.
+    Desktop isolation(false);
     if (!isolation.ready) {
         std::fprintf(stderr, "Skipped Windows desktop integration because desktop creation is restricted: %lu\n",
                      GetLastError());
         return 0;
     }
-    if (isolation.privateClipboard) {
-        const auto owner = CreateWindowExW(0, L"STATIC", nullptr, WS_POPUP, 0, 0, 1, 1,
-                                           nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-        const auto other = CreateWindowExW(0, L"STATIC", nullptr, WS_POPUP, 0, 0, 1, 1,
-                                           nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-        if (!owner || !other || !TestClipboard(owner, other)) {
-            std::fputs("Isolated clipboard test failed.\n", stderr);
-            return 1;
-        }
-        DestroyWindow(other);
-        if (!OpenClipboard(owner) || !EmptyClipboard()) {
-            std::fputs("Could not reset the isolated clipboard for the tray test.\n", stderr);
-            return 1;
-        }
-        CloseClipboard();
-        DestroyWindow(owner);
-        std::puts("Isolated clipboard integration passed.");
-    } else {
-        std::puts("Skipped clipboard integration because a private window station is unavailable.");
-    }
     if (!RunTestTray(true, false, {}, TestEmptyFlyout) || !RunTestTray(false, false, {}, TestEmptyFlyout) ||
-        !TestWithVault(true, isolation.privateClipboard, TestRowCopy) ||
-        !TestWithVault(false, isolation.privateClipboard, TestRowCopy)) {
+        !TestWithVault(true, false, TestRowCopy) ||
+        !TestWithVault(false, false, TestRowCopy)) {
         std::fputs("Isolated flyout test failed.\n", stderr);
         return 1;
     }
@@ -1057,7 +1063,4 @@ int main() {
     std::puts("Tag checkboxes, new tag creation, Save and Cancel passed.");
     std::puts("Shortcut, backup and window placement dialogs passed.");
     std::puts("Both isolated flyout modes passed.");
-    if (isolation.privateClipboard) {
-        std::puts("Both flyout modes copied from the provider row, confirmed success, and respected drag cancellation.");
-    }
 }

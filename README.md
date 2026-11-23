@@ -40,6 +40,6 @@ Read [Vault and shortcut settings](ACCESS.md) or [Storage format](DESIGN.md) for
 
 Run `pwsh -NoProfile -File ./build.ps1` in the staging checkout on 64-bit Windows with PowerShell 7.3+, Windhawk 1.7.3, and the .NET 9 runtime for packaging. The build tests both editions and writes the Velopack installer, mod source, update feed and checksums to `build/release/`. Use `./build.ps1 -Velopack:$false` in PowerShell for the NSIS installer with manual updates.
 
-For the Velopack edition, use **Check for updates** in the tray icon's context menu. It contacts GitHub to check the latest stable release and asks before downloading. The installer is unsigned. [Update or roll back](UPDATES.md)
+The Velopack edition checks GitHub for stable updates automatically by default and asks before downloading. Toggle automatic checks in **Settings**, or choose **Check for updates** there or in the tray icon's context menu. The installer is unsigned. [Update or roll back](UPDATES.md)
 
 The source is available under the [MIT License](LICENSE).

@@ -4,7 +4,7 @@
 
 ## Standalone with Velopack
 
-1. Right-click the tray icon and choose **Check for updates**.
+1. Automatic checks are on by default. You can turn them off in **Settings**. To check at any time, choose **Check for updates** in **Settings** or in the tray icon's context menu.
 2. Confirm the download and installation. TOTP flyout closes and starts again automatically.
 3. Unlock your vault as usual. The updater replaces app files and the vault stays in its existing user folder.
 

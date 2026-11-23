@@ -10,11 +10,13 @@ void ShowUpdateError(HWND owner) {
                 L"TOTP flyout", MB_OK | MB_ICONERROR);
 }
 
-void StartUpdateCheck(HWND owner) {
+void StartUpdateCheck(HWND owner, bool manual) {
     wchar_t executable[32768];
     const auto length = GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
-    if (!length || length == ARRAYSIZE(executable) ||
-        reinterpret_cast<INT_PTR>(ShellExecuteW(owner, L"open", executable, L"--check-updates", nullptr, SW_SHOWNORMAL)) <= 32) {
+    const auto argument = manual ? L"--check-updates" : L"--check-updates-background";
+    const bool started = length && length < ARRAYSIZE(executable) &&
+        reinterpret_cast<INT_PTR>(ShellExecuteW(owner, L"open", executable, argument, nullptr, SW_SHOWNORMAL)) > 32;
+    if (!started && manual) {
         ShowUpdateError(owner);
     }
 }
@@ -36,15 +38,17 @@ bool CloseRunningApp() {
     return exited;
 }
 
-void CheckForUpdates() {
+void CheckForUpdates(bool manual) {
     twofa::russianUi = twofa::LoadPreferences().russian;
     try {
         Velopack::UpdateManager updates(TWOFA_UPDATE_SOURCE);
         const auto pending = updates.UpdatePendingRestart();
         const auto available = pending ? std::nullopt : updates.CheckForUpdates();
         if (!pending && !available) {
-            MessageBoxW(nullptr, twofa::Ui(L"TOTP flyout is up to date."), L"TOTP flyout",
-                        MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+            if (manual) {
+                MessageBoxW(nullptr, twofa::Ui(L"TOTP flyout is up to date."), L"TOTP flyout",
+                            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+            }
             return;
         }
         if (MessageBoxW(nullptr, twofa::Ui(L"Download and install the available update? TOTP flyout will restart."),
@@ -60,7 +64,9 @@ void CheckForUpdates() {
         }
         updates.WaitExitThenApplyUpdates(pending ? *pending : available->TargetFullRelease, false, true, {"--show"});
     } catch (const std::exception&) {
-        ShowUpdateError(nullptr);
+        if (manual) {
+            ShowUpdateError(nullptr);
+        }
     }
 }
 
@@ -69,16 +75,21 @@ void CheckForUpdates() {
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int) {
     const auto command = twofa::TrimName(arguments);
-    void (*checkUpdates)(HWND) = nullptr;
+    twofa::UpdateCheck checkUpdates = nullptr;
 #ifdef TWOFA_UPDATE_SOURCE
     Velopack::VelopackApp::Build().SetAutoApplyOnStartup(false).Run();
-    if (command == L"--check-updates") {
+    const bool manual = command == L"--check-updates";
+    if (manual || command == L"--check-updates-background") {
         const auto updateCheck = CreateMutexW(nullptr, FALSE, L"Local\\TOTP-flyout-update-check");
         if (!updateCheck) {
             return 1;
         }
         if (GetLastError() != ERROR_ALREADY_EXISTS) {
-            CheckForUpdates();
+            CheckForUpdates(manual);
+        } else if (manual) {
+            twofa::russianUi = twofa::LoadPreferences().russian;
+            MessageBoxW(nullptr, twofa::Ui(L"An update check is already running."), L"TOTP flyout",
+                        MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
         }
         CloseHandle(updateCheck);
         return 0;
