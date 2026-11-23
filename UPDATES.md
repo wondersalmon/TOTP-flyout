@@ -21,6 +21,6 @@ For builds that cannot read the current local vault format, restore the portable
 
 ## Release and local testing
 
-Run `./build.ps1 -Velopack` to produce the installer, `releases.win.json` and the referenced `*-full.nupkg`. Upload all three with the mod source and checksums. A matching version tag builds and publishes through GitHub Actions. Tags with a preview suffix become prereleases, while the in-app check uses the latest stable release. A public GitHub repository needs no token on users' computers. [Velopack update sources](https://docs.velopack.io/integrating/update-sources)
+Run `./build.ps1` to produce the Velopack installer, `releases.win.json` and the referenced `*-full.nupkg`. Upload all three with the mod source and checksums. A matching version tag builds and publishes through GitHub Actions. Tags with a preview suffix become prereleases, while the in-app check uses the latest stable release. A public GitHub repository needs no token on users' computers. [Velopack update sources](https://docs.velopack.io/integrating/update-sources)
 
 To test locally, point the build at an existing directory with `-UpdateSource`. Build two increasing preview versions for the same app ID. Install the older build in an isolated Windows user account, put the newer feed and full package in that directory, then use the tray update command.

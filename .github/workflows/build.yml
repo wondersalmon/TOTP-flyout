@@ -42,7 +42,6 @@ jobs:
           $options = @{
             ToolchainRoot = (Join-Path $env:RUNNER_TEMP 'compiler-installation')
             Coverage = $true
-            Velopack = $true
           }
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $options.ReleaseTag = $env:GITHUB_REF_NAME

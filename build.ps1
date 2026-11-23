@@ -5,7 +5,7 @@ param(
     [switch]$Coverage,
     [string]$LlvmBin = (Join-Path $env:ProgramFiles 'LLVM/bin'),
     [string]$NsisCompiler,
-    [switch]$Velopack,
+    [switch]$Velopack = $true,
     [string]$UpdateSource = 'https://github.com/wondersalmon/TOTP-flyout/releases/latest/download'
 )
 

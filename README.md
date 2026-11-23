@@ -15,7 +15,7 @@ TOTP flyout is an offline authenticator for the Windows tray. It **encrypts setu
 
 | Edition | File | How to start |
 | --- | --- | --- |
-| Standalone for 64-bit Windows | `TOTP-flyout-setup.exe` | Run Setup, then open **TOTP flyout** from Start. It installs for your Windows user. |
+| Standalone for 64-bit Windows | `TOTP-flyout-setup.exe` from the [latest release](https://github.com/wondersalmon/TOTP-flyout/releases/latest) | Run Setup, then open **TOTP flyout** from Start. It installs for your Windows user. |
 | Windhawk | `TOTP-flyout.wh.cpp` | Create a local mod in Windhawk 1.7.3 and compile the file in the editor. |
 
 Open the tray icon, then follow [Move your authenticator keys](IMPORT.md). New installations start with an empty list.
@@ -38,7 +38,7 @@ Read [Vault and shortcut settings](ACCESS.md) or [Storage format](DESIGN.md) for
 
 ## Build and update
 
-Run `pwsh -NoProfile -File ./build.ps1 -Velopack` in the staging checkout on 64-bit Windows with PowerShell 7.3+, Windhawk 1.7.3, and the .NET 9 runtime for packaging. The build tests both editions and writes the installer, mod source, update feed and checksums to `build/release/`. Omit `-Velopack` to build the manual-update installer with NSIS.
+Run `pwsh -NoProfile -File ./build.ps1` in the staging checkout on 64-bit Windows with PowerShell 7.3+, Windhawk 1.7.3, and the .NET 9 runtime for packaging. The build tests both editions and writes the Velopack installer, mod source, update feed and checksums to `build/release/`. Use `./build.ps1 -Velopack:$false` in PowerShell for the NSIS installer with manual updates.
 
 For the Velopack edition, use **Check for updates** in the tray icon's context menu. It contacts GitHub to check the latest stable release and asks before downloading. The installer is unsigned. [Update or roll back](UPDATES.md)
 
