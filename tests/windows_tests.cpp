@@ -273,6 +273,7 @@ bool TestFlyoutEntryPoints() {
     RECT beforeToast{}, afterToast{};
     if (!toast || !IsWindowVisible(toast) || !progress || IsWindowVisible(progress) ||
         !GetWindowRect(flyout, &beforeToast)) {
+        std::fputs("The unlock notification did not replace the countdown footer.\n", stderr);
         return false;
     }
     SendMessageW(flyout, WM_TIMER, 6, 0);
@@ -359,8 +360,15 @@ bool RunTestTray(bool standalone, bool verifyCopy, const std::wstring& vaultPath
     PeekMessageW(&quit, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
     activeTrayTest = nullptr;
     CloseHandle(stop);
-    return result == 0 && test.passed && !FindWindowW(twofa::TrayWindowClass(standalone), nullptr) &&
-           (!verifyCopy || !IsClipboardFormatAvailable(CF_UNICODETEXT));
+    const bool closed = !FindWindowW(twofa::TrayWindowClass(standalone), nullptr);
+    const bool clipboardClear = !verifyCopy || !IsClipboardFormatAvailable(CF_UNICODETEXT);
+    if (result != 0 || !test.passed || !closed || !clipboardClear) {
+        std::fprintf(stderr, "%s flyout with %s vault: exit=%d, checks=%d, closed=%d, clipboard cleared=%d.\n",
+                     standalone ? "Standalone" : "Windhawk", vaultPath.empty() ? "no" : "a fixture",
+                     result, test.passed, closed, clipboardClear);
+        return false;
+    }
+    return true;
 }
 
 constexpr auto kTestVaultPassword = L"p6test";
@@ -390,6 +398,9 @@ void CALLBACK TestEmptyFlyout(HWND, UINT, UINT_PTR timer, DWORD) {
     wchar_t title[32]{};
     activeTrayTest->passed = button && GetWindowTextW(button, title, ARRAYSIZE(title)) &&
         std::wstring_view(title) == L"Import accounts" && SendDlgItemMessageW(window, 102, LB_GETCOUNT, 0, 0) == 0;
+    if (!activeTrayTest->passed) {
+        std::fputs("The empty flyout did not expose its import button and empty account list.\n", stderr);
+    }
     if (activeTrayTest->passed && activeTrayTest->standalone) {
         ShowWindow(window, SW_HIDE);
         SendMessageW(window, twofa::kShowStandaloneFlyout, 0, 0);
@@ -405,9 +416,10 @@ void CALLBACK TestRowCopy(HWND, UINT, UINT_PTR timer, DWORD) {
     if (button && !IsWindowEnabled(button)) {
         std::puts("Skipped provider-row UI checks because session notifications are unavailable.");
         activeTrayTest->passed = true;
+    } else if (!button || !UnlockTestVault(window, button, 7)) {
+        std::fputs("The isolated flyout could not unlock the fixture vault.\n", stderr);
     } else {
-        activeTrayTest->passed = button && UnlockTestVault(window, button, 7) &&
-            TestFlyoutEntryPoints() && ExerciseProviderRow(activeTrayTest->verifyCopy);
+        activeTrayTest->passed = TestFlyoutEntryPoints() && ExerciseProviderRow(activeTrayTest->verifyCopy);
     }
     SetEvent(activeTrayTest->stop);
 }
