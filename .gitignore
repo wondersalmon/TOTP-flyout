@@ -1,0 +1,8 @@
+/build/
+/.vs/
+/.env
+/.env.*
+*.vault
+*.vault.*
+*.2fa-vault
+*.2fa-vault.*
