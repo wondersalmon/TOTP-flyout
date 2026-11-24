@@ -15,7 +15,7 @@ TOTP flyout is an offline authenticator for the Windows tray. It **encrypts setu
 
 | Edition | File | How to start |
 | --- | --- | --- |
-| Standalone for 64-bit Windows | `TOTP-flyout-setup.exe` from the [latest release](https://github.com/wondersalmon/TOTP-flyout/releases/latest) | Run Setup, then open **TOTP flyout** from Start. It installs for your Windows user. |
+| Standalone for 64-bit Windows | `TOTP-flyout-<version>-setup.exe` from the [latest release](https://github.com/wondersalmon/TOTP-flyout/releases/latest) | Run Setup, then open **TOTP flyout** from Start. It installs for your Windows user. |
 | Windhawk | `TOTP-flyout.wh.cpp` | Create a local mod in Windhawk 1.7.3 and compile the file in the editor. |
 
 Click the tray icon to open or hide the flyout. To set up a new installation, follow [Move your authenticator keys](IMPORT.md).

@@ -168,11 +168,11 @@ if (!$Velopack -and !$NsisCompiler) {
     }
 }
 New-Item -ItemType Directory -Force -Path $release | Out-Null
-$setup = Join-Path $release 'TOTP-flyout-setup.exe'
+$packageVersion = if ($ReleaseTag) { $ReleaseTag.Substring(1) } else { $version }
+$setup = Join-Path $release "TOTP-flyout-$packageVersion-setup.exe"
 $publishedMod = Join-Path $release (Split-Path -Leaf $modSource)
 $packages = @()
 if ($Velopack) {
-    $packageVersion = if ($ReleaseTag) { $ReleaseTag.Substring(1) } else { $version }
     $packages = @(Build-VelopackRelease $velo $packageVersion $standalone $license $setup $release)
 } else {
     if (!(Test-Path -LiteralPath $NsisCompiler -PathType Leaf)) {
@@ -186,8 +186,9 @@ if ($Velopack) {
 }
 Copy-Item -LiteralPath $modSource -Destination $publishedMod -Force
 Get-ChildItem -LiteralPath $release -File | Where-Object {
-    ($_.Name -eq 'releases.win.json' -or $_.Name -match '^wondersalmon\.TotpFlyout-[0-9][0-9A-Za-z.-]*-full\.nupkg$') -and
-        $_.FullName -notin $packages
+    ($_.Name -eq 'releases.win.json' -or $_.Name -match '^wondersalmon\.TotpFlyout-[0-9][0-9A-Za-z.-]*-full\.nupkg$' -or
+        $_.Name -match '^TOTP-flyout-(?:[0-9][0-9A-Za-z.-]*-)?setup\.exe$') -and
+        $_.FullName -notin ($packages + @($setup))
 } | Remove-Item
 $publishedFiles = @($publishedMod, $setup) + $packages
 $checksums = Get-FileHash -LiteralPath $publishedFiles -Algorithm SHA256 | ForEach-Object {

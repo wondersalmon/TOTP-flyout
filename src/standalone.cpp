@@ -41,7 +41,15 @@ bool CloseRunningApp() {
 void CheckForUpdates(bool manual) {
     twofa::russianUi = twofa::LoadPreferences().russian;
     try {
-        Velopack::UpdateManager updates(TWOFA_UPDATE_SOURCE);
+        const std::string source = TWOFA_UPDATE_SOURCE;
+        std::unique_ptr<Velopack::IUpdateSourcePointer> updateSource;
+        if (source.find("://") != std::string::npos) {
+            // The configured URL points to the asset directory, not a GitHub repository.
+            updateSource = std::make_unique<Velopack::HttpSource>(source);
+        } else {
+            updateSource = std::make_unique<Velopack::FileSource>(source);
+        }
+        Velopack::UpdateManager updates(std::move(updateSource));
         const auto pending = updates.UpdatePendingRestart();
         const auto available = pending ? std::nullopt : updates.CheckForUpdates();
         if (!pending && !available) {
