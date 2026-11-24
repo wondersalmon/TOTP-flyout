@@ -106,6 +106,7 @@ struct Account {
     unsigned period = 30;
     std::uint32_t useCount = 0;
     std::uint64_t lastUsed = 0;
+    bool favorite = false;
 };
 
 inline std::optional<TotpCode> CalculateAccountCode(const Account& account, std::uint64_t unixSeconds) {
@@ -239,12 +240,30 @@ inline int CompareAccountNames(std::wstring_view left, std::wstring_view right) 
                                                 right.data(), static_cast<int>(right.size()), TRUE);
 }
 
+inline bool MatchesSearch(const Account& account, std::wstring_view query) {
+    if (query.empty()) {
+        return true;
+    }
+    const auto contains = [query](std::wstring_view text) {
+        while (text.size() >= query.size()) {
+            if (SameName(text.substr(0, query.size()), query)) {
+                return true;
+            }
+            text.remove_prefix(1);
+        }
+        return false;
+    };
+    return contains(account.issuer) || contains(AccountDisplayName(account.issuer, account.label)) ||
+           std::ranges::any_of(account.tags, contains);
+}
+
 inline std::vector<std::size_t> AccountRows(std::span<const Account> accounts,
-                                            std::optional<std::wstring_view> filter, AccountSort sort) {
+                                            std::optional<std::wstring_view> filter, AccountSort sort,
+                                            std::wstring_view query = {}, bool favoritesOnly = false) {
     std::vector<std::size_t> rows;
     rows.reserve(accounts.size());
     for (std::size_t i = 0; i < accounts.size(); ++i) {
-        if (MatchesTag(accounts[i], filter)) {
+        if ((!favoritesOnly || accounts[i].favorite) && MatchesTag(accounts[i], filter) && MatchesSearch(accounts[i], query)) {
             rows.push_back(i);
         }
     }
@@ -296,10 +315,12 @@ struct RefreshTime {
 
 inline std::optional<RefreshTime> NextRefresh(std::span<const Account> accounts,
                                               std::optional<std::wstring_view> tag,
-                                              std::uint64_t unixSeconds) {
+                                              std::uint64_t unixSeconds, std::wstring_view query = {},
+                                              bool favoritesOnly = false) {
     std::optional<RefreshTime> next;
     for (const auto& account : accounts) {
-        if (!MatchesTag(account, tag) || !account.period) {
+        if (!account.period || (favoritesOnly && !account.favorite) ||
+            !MatchesTag(account, tag) || !MatchesSearch(account, query)) {
             continue;
         }
         const auto seconds = account.period - static_cast<unsigned>(unixSeconds % account.period);

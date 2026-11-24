@@ -113,6 +113,9 @@ private:
     static constexpr UINT_PTR kFeedbackTimer = 8;
     static constexpr UINT_PTR kHideAfterCopyTimer = 9;
     static constexpr UINT_PTR kUpdateCheckTimer = 10;
+    static constexpr UINT_PTR kDeactivateTimer = 11;
+    static constexpr UINT_PTR kCopyConfirmationTimer = 12;
+    static constexpr UINT kDeactivateDelayMs = 150;
     static constexpr UINT kFirstUpdateCheckMs = 15000;
     static constexpr UINT kUpdateCheckIntervalMs = 12 * 60 * 60 * 1000;
     static constexpr UINT kHideAfterCopyMs = 500;
@@ -140,10 +143,14 @@ private:
     static constexpr UINT kImportButton = 108;
     static constexpr UINT kEditButton = 109;
     static constexpr UINT kAccountScroll = 110;
+    static constexpr UINT kSearch = 111;
+    static constexpr UINT kAddButton = 112;
+    static constexpr UINT kFavoritesButton = 113;
     static constexpr UINT kEditSelectedTag = 0x8000;
     static constexpr UINT kEditAccountTags = 0x8001;
     static constexpr int kGutter = 16;
     enum class Motion { Idle, Entering, Leaving };
+    enum class RowAction { None, Favorite, Remove };
     struct RowDrag {
         WORD source;
         WORD target;
@@ -153,7 +160,7 @@ private:
         bool moving = false;
     };
     enum Action : UINT {
-        ImportLink = 201, SetTags, Lock, RenameAccount, RemoveAccount, MoveUp, MoveDown, AddAccount, ImportText, ImportHtml, ImportVault, ImportMenu, ImportClipboard, UnlockLocalVault, UseWindowsVault
+        ImportLink = 201, SetTags, Lock, RenameAccount, RemoveAccount, MoveUp, MoveDown, AddAccount, ImportText, ImportHtml, ImportVault, ImportMenu, ImportClipboard, UnlockLocalVault, UseWindowsVault, ToggleFavorite
     };
     static constexpr std::array<PCWSTR, 6> kSortNames{
         L"Manual order", L"Name (A to Z)", L"Name (Z to A)", L"Provider", L"Most used", L"Recently used"
@@ -181,7 +188,9 @@ private:
                 }
                 if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE &&
                     (message.hwnd == window_ || IsChild(window_, message.hwnd))) {
-                    if (drag_) {
+                    if (message.hwnd == search_ && GetWindowTextLengthW(search_) > 0) {
+                        SetWindowTextW(search_, L"");
+                    } else if (drag_) {
                         EndRowDrag();
                     } else {
                         DismissFlyout();
@@ -194,6 +203,11 @@ private:
                     if (motion_ != Motion::Leaving && !(message.lParam & (1L << 30))) {
                         CopyAccountCode(*selected_);
                     }
+                    continue;
+                }
+                if (message.message == WM_KEYDOWN && message.wParam == VK_RETURN &&
+                    message.hwnd == search_ && accountCount_) {
+                    SetFocus(accountList_);
                     continue;
                 }
                 if (message.message == WM_SYSKEYDOWN && message.hwnd == accountList_ &&
@@ -231,6 +245,7 @@ private:
         if (message == WM_NCDESTROY) {
             RemoveWindowSubclass(list, AccountListProc, id);
         } else if (message == WM_CANCELMODE) {
+            flyout->rowActionPressed_.reset();
             flyout->EndRowDrag();
         } else if (message == WM_MOUSEMOVE) {
             const POINT pointer{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -264,7 +279,10 @@ private:
             if (row) {
                 SetFocus(list);
                 flyout->SelectRow(*row);
-                if (flyout->IsDragGrip(pointer)) {
+                const auto action = flyout->HitRowAction(*row, pointer);
+                if (action != RowAction::None && flyout->selected_) {
+                    flyout->rowActionPressed_.emplace(*flyout->selected_, action);
+                } else if (flyout->IsDragGrip(pointer)) {
                     RECT bounds{};
                     SendMessageW(list, LB_GETITEMRECT, *row, reinterpret_cast<LPARAM>(&bounds));
                     flyout->drag_ = RowDrag{*row, *row, pointer, pointer, pointer.y - bounds.top};
@@ -277,6 +295,24 @@ private:
                 return 0;
             }
         } else if (message == WM_LBUTTONUP) {
+            if (const auto pressed = std::exchange(flyout->rowActionPressed_, std::nullopt)) {
+                if (GetCapture() == list) {
+                    ReleaseCapture();
+                }
+                const POINT pointer{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                const auto row = flyout->HitRow(pointer);
+                InvalidateRect(list, nullptr, FALSE);
+                const auto [index, action] = *pressed;
+                if (row && flyout->HitRowAction(*row, pointer) == action && flyout->selected_ == index &&
+                    SendMessageW(list, LB_GETITEMDATA, *row, 0) == static_cast<LRESULT>(index)) {
+                    if (action == RowAction::Favorite) {
+                        flyout->ToggleSelectedFavorite();
+                    } else {
+                        flyout->RemoveSelectedAccount(false);
+                    }
+                }
+                return 0;
+            }
             if (flyout->drag_) {
                 const auto drag = *flyout->drag_;
                 const POINT pointer{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -302,6 +338,7 @@ private:
             }
         } else if (message == WM_CAPTURECHANGED) {
             flyout->copyPressed_.reset();
+            flyout->rowActionPressed_.reset();
             flyout->EndRowDrag();
             InvalidateRect(list, nullptr, FALSE);
         } else if (message == WM_CONTEXTMENU) {
@@ -317,6 +354,25 @@ private:
         const auto result = DefSubclassProc(list, message, wparam, lparam);
         if (message == WM_KEYDOWN || message == LB_SETTOPINDEX || message == LB_SETCURSEL || message == WM_VSCROLL) {
             InvalidateRect(flyout->accountScroll_, nullptr, FALSE);
+        }
+        return result;
+    }
+
+    static LRESULT CALLBACK SearchProc(HWND edit, UINT message, WPARAM wparam, LPARAM lparam,
+                                      UINT_PTR id, DWORD_PTR context) {
+        const auto result = DefSubclassProc(edit, message, wparam, lparam);
+        if (message == WM_NCDESTROY) {
+            RemoveWindowSubclass(edit, SearchProc, id);
+        } else if (message == WM_PAINT && !GetWindowTextLengthW(edit)) {
+            const auto flyout = reinterpret_cast<const TrayFlyout*>(context);
+            RECT field{};
+            GetClientRect(edit, &field);
+            field.left += flyout->Scale(5);
+            if (const auto dc = GetDC(edit)) {
+                PaintText(dc, Ui(L"Search accounts"), field, flyout->labelFont_, flyout->palette_.muted,
+                          DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                ReleaseDC(edit, dc);
+            }
         }
         return result;
     }
@@ -406,9 +462,36 @@ private:
         }
     }
 
-    bool CanDragRows() const { return editing_ && sort_ == AccountSort::Manual && accountCount_ > 1; }
+    bool CanDragRows() const {
+        return editing_ && !favoritesOnly_ && searchQuery_.empty() && sort_ == AccountSort::Manual && accountCount_ > 1;
+    }
 
     bool IsDragGrip(POINT pointer) const { return CanDragRows() && pointer.x < Scale(33); }
+
+    RECT RowActionBounds(const RECT& row) const {
+        const int center = (row.top + row.bottom) / 2;
+        return {row.right - Scale(39), center - Scale(15), row.right - Scale(9), center + Scale(15)};
+    }
+
+    RECT FavoriteBounds(const RECT& row) const {
+        auto star = RowActionBounds(row);
+        OffsetRect(&star, -Scale(34), 0);
+        return star;
+    }
+
+    RowAction HitRowAction(WORD index, POINT pointer) const {
+        RECT row{};
+        if (!editing_ || SendMessageW(accountList_, LB_GETITEMRECT, index, reinterpret_cast<LPARAM>(&row)) == LB_ERR) {
+            return RowAction::None;
+        }
+        row.bottom -= Scale(5);
+        const auto button = RowActionBounds(row);
+        if (PtInRect(&button, pointer)) {
+            return RowAction::Remove;
+        }
+        const auto star = FavoriteBounds(row);
+        return PtInRect(&star, pointer) ? RowAction::Favorite : RowAction::None;
+    }
 
     WORD DragTarget(POINT pointer) const {
         RECT client{};
@@ -653,7 +736,7 @@ private:
         if (SendMessageW(accountList_, LB_GETITEMRECT, LOWORD(hit), reinterpret_cast<LPARAM>(&row)) == LB_ERR) {
             return std::nullopt;
         }
-        row.bottom -= Scale(4);
+        row.bottom -= Scale(5);
         return PtInRect(&row, point) ? std::optional<WORD>(LOWORD(hit)) : std::nullopt;
     }
 
@@ -685,13 +768,16 @@ private:
             }
             SelectRow(*row);
         }
-        if (!SelectedAccount()) {
+        const auto account = SelectedAccount();
+        if (!account) {
             return;
         }
         ThemedMenu menu(palette_, dpi_, textScale_);
+        menu.Add(ToggleFavorite, account->favorite ? L"Remove from favorites" : L"Add to favorites",
+                 MFS_ENABLED, false, account->favorite ? L"\ue735" : L"\ue734");
         menu.Add(RenameAccount, L"Rename account...", MFS_ENABLED, false, L"\ue70f");
         menu.Add(SetTags, L"Edit tags...", MFS_ENABLED, false, L"\ue8ec");
-            if (editing_ && sort_ == AccountSort::Manual) {
+        if (CanDragRows()) {
             const auto row = SendMessageW(accountList_, LB_GETCURSEL, 0, 0);
             menu.Separator();
             menu.Add(MoveUp, L"Move up", row > 0 ? MFS_ENABLED : MFS_DISABLED, false, L"\ue74a");
@@ -705,6 +791,7 @@ private:
         const auto action = TrackMenu(menu, pointer);
         if (generation == lockGeneration_) {
             switch (action) {
+                case ToggleFavorite: ToggleSelectedFavorite(); break;
                 case RenameAccount: EditAccountName(); break;
                 case SetTags: AssignTags(); break;
                 case MoveUp: MoveSelected(-1); break;
@@ -733,17 +820,33 @@ private:
             case WM_CREATE:
                 return CreateControls() ? 0 : -1;
             case WM_COMMAND:
-                if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kTagFilter) {
+                if (LOWORD(wparam) == kSearch && (HIWORD(wparam) == EN_SETFOCUS || HIWORD(wparam) == EN_KILLFOCUS)) {
+                    InvalidateRect(window_, &searchBounds_, FALSE);
+                } else if (HIWORD(wparam) == EN_CHANGE && LOWORD(wparam) == kSearch && accountList_) {
+                    wchar_t query[kMaxNameLength + 1]{};
+                    GetWindowTextW(search_, query, ARRAYSIZE(query));
+                    searchQuery_ = TrimName(query);
+                    lastActivity_ = GetTickCount64();
+                    RefreshList();
+                } else if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kTagFilter) {
                     ShowTagMenu();
                 } else if (HIWORD(wparam) == LBN_SELCHANGE && LOWORD(wparam) == kAccounts) {
                     lastActivity_ = GetTickCount64();
                     UpdateSelection();
                 } else if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kImportButton) {
-                    ShowImportAccounts();
+                    ShowImportAccounts(importButton_);
+                } else if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kAddButton) {
+                    ShowImportAccounts(addButton_);
                 } else if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kSettings) {
                     ShowSettings();
                 } else if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kEditButton) {
                     ToggleEditing();
+                } else if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kFavoritesButton) {
+                    favoritesOnly_ = !favoritesOnly_;
+                    RefreshList();
+                    if (!WritePreference(FavoritesPreference(), favoritesOnly_)) {
+                        SetNote(L"Some settings apply to this session only.");
+                    }
                 } else if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kSort) {
                     ShowSortMenu();
                 } else if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == kClose) {
@@ -800,10 +903,17 @@ private:
                 break;
             case WM_ERASEBKGND:
                 return 1;
+            case WM_LBUTTONUP:
+                if (IsWindowEnabled(search_) && PtInRect(&searchBounds_, {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)})) {
+                    SetFocus(search_);
+                    return 0;
+                }
+                break;
+            case WM_CTLCOLOREDIT:
             case WM_CTLCOLORSTATIC: {
                 const auto child = reinterpret_cast<HWND>(lparam);
                 const auto dc = reinterpret_cast<HDC>(wparam);
-                const bool inEmptyCard = child == emptyTitle_ || child == emptyHint_;
+                const bool inEmptyCard = child == emptyTitle_ || child == emptyHint_ || child == search_;
                 const bool muted = child == emptyHint_ || child == timerLabel_ || child == note_;
                 SetBkMode(dc, OPAQUE);
                 SetBkColor(dc, inEmptyCard ? palette_.card : palette_.surface);
@@ -886,9 +996,13 @@ private:
                 if (LOWORD(wparam) == WA_INACTIVE) {
                     SetHotButton(nullptr);
                     if (!handlingCommand_ && !previewVisible_ && !movingWindow_ && !CursorOverTrayIcon()) {
-                        DismissFlyout();
+                        // Explorer may move focus before delivering the tray click.
+                        if (!SetTimer(window_, kDeactivateTimer, kDeactivateDelayMs, nullptr)) {
+                            DismissFlyout();
+                        }
                     }
                 } else {
+                    KillTimer(window_, kDeactivateTimer);
                     previewVisible_ = false;
                 }
                 return 0;
@@ -908,7 +1022,12 @@ private:
                 }
                 return 0;
             case WM_TIMER:
-                if (wparam == kTimer) {
+                if (wparam == kDeactivateTimer) {
+                    KillTimer(window_, kDeactivateTimer);
+                    if (!handlingCommand_ && !previewVisible_ && !movingWindow_ && GetForegroundWindow() != window_) {
+                        DismissFlyout();
+                    }
+                } else if (wparam == kTimer) {
                     UpdateCountdown();
                 } else if (wparam == kLockTimer) {
                     CheckSession();
@@ -921,6 +1040,7 @@ private:
                     UpdateCopyPulse();
                 } else if (wparam == kCopyNoteTimer) {
                     ClearNote();
+                } else if (wparam == kCopyConfirmationTimer) {
                     StopCopyPulse();
                 } else if (wparam == kDragScrollTimer) {
                     ScrollRowDrag();
@@ -959,16 +1079,16 @@ private:
                 return 0;
             case kTrayMessage:
                 switch (LOWORD(lparam)) {
+                    case WM_LBUTTONDOWN:
+                    case WM_LBUTTONDBLCLK:
+                        lastTrayClick_ = 0;
+                        break;
                     case NIN_SELECT:
-                    case NIN_KEYSELECT:
                     case WM_LBUTTONUP:
-                        if (!handlingCommand_ && sessionAvailable_) {
-                            if (IsWindowVisible(window_) && motion_ != Motion::Leaving) {
-                                HideFlyout();
-                            } else {
-                                ShowFlyout();
-                            }
-                        }
+                        HandleTrayClick(LOWORD(lparam));
+                        break;
+                    case NIN_KEYSELECT:
+                        ToggleFromTray();
                         break;
                     case WM_CONTEXTMENU:
                     case WM_RBUTTONUP:
@@ -992,11 +1112,13 @@ private:
                 KillTimer(window_, kMotionTimer);
                 KillTimer(window_, kClipboardTimer);
                 KillTimer(window_, kCopyPulseTimer);
+                KillTimer(window_, kCopyConfirmationTimer);
                 KillTimer(window_, kCopyNoteTimer);
                 KillTimer(window_, kDragScrollTimer);
                 KillTimer(window_, kFeedbackTimer);
                 KillTimer(window_, kHideAfterCopyTimer);
                 KillTimer(window_, kUpdateCheckTimer);
+                KillTimer(window_, kDeactivateTimer);
                 clipboard_.Clear(window_, true);
                 if (sessionNotifications_) {
                     WTSUnRegisterSessionNotification(window_);
@@ -1016,7 +1138,7 @@ private:
     }
 
     HWND CreateChild(PCWSTR kind, PCWSTR text, DWORD style, UINT id = 0) const {
-        return CreateWindowExW(0, kind, Ui(text), WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0,
+        return CreateWindowExW(0, kind, Ui(text), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, 0, 0, 0, 0,
                                window_, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
                                GetModuleHandleW(nullptr), nullptr);
     }
@@ -1027,8 +1149,12 @@ private:
             return false;
         }
         title_ = CreateChild(L"STATIC", L"TOTP flyout", SS_NOPREFIX | SS_CENTERIMAGE);
+        search_ = CreateChild(L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, kSearch);
+        addButton_ = CreateChild(L"BUTTON", L"Add account", BS_OWNERDRAW | WS_TABSTOP, kAddButton);
         settings_ = CreateChild(L"BUTTON", L"Settings", BS_OWNERDRAW | WS_TABSTOP, kSettings);
         edit_ = CreateChild(L"BUTTON", L"Edit accounts", BS_OWNERDRAW | WS_TABSTOP, kEditButton);
+        favorites_ = CreateChild(L"BUTTON", L"Show favorites only", BS_OWNERDRAW | WS_TABSTOP, kFavoritesButton);
+        favoritesOnly_ = ReadPreference(FavoritesPreference(), 0) == 1;
         close_ = CreateChild(L"BUTTON", L"Close", BS_OWNERDRAW | WS_TABSTOP, kClose);
         tagFilter_ = CreateChild(L"BUTTON", L"All tags", BS_OWNERDRAW | WS_TABSTOP,
                                    kTagFilter);
@@ -1050,10 +1176,11 @@ private:
         progress_ = CreateChild(PROGRESS_CLASSW, L"Time until the next code", PBS_SMOOTH);
         note_ = CreateChild(L"STATIC", L"", SS_OWNERDRAW | SS_NOPREFIX);
         ShowWindow(note_, SW_HIDE);
-        if (!title_ || !close_ || !tagFilter_ || !sortButton_ || !accountList_ ||
+        if (!title_ || !search_ || !addButton_ || !favorites_ || !close_ || !tagFilter_ || !sortButton_ || !accountList_ ||
             !emptyTitle_ || !emptyHint_ || !importButton_ || !timerLabel_ || !countdown_ || !progress_ || !note_ || !settings_ || !edit_ ||
             !accountScroll_ || !SetWindowSubclass(accountScroll_, ScrollbarProc, 1, reinterpret_cast<DWORD_PTR>(this)) ||
             !SetWindowSubclass(accountList_, AccountListProc, 1, reinterpret_cast<DWORD_PTR>(this)) ||
+            !SetWindowSubclass(search_, SearchProc, 1, reinterpret_cast<DWORD_PTR>(this)) ||
             !SetWindowSubclass(progress_, ProgressProc, 1, reinterpret_cast<DWORD_PTR>(this)) ||
             !SetTimer(window_, kLockTimer, 1000, nullptr)) {
             return false;
@@ -1069,6 +1196,9 @@ private:
         buttonFeedback_[3].window = close_;
         buttonFeedback_[4].window = importButton_;
         buttonFeedback_[5].window = edit_;
+        buttonFeedback_[6].window = addButton_;
+        buttonFeedback_[7].window = favorites_;
+        SendMessageW(search_, EM_SETLIMITTEXT, kMaxNameLength, 0);
         for (const auto& button : buttonFeedback_) {
             if (!SetWindowSubclass(button.window, ButtonProc, 1, reinterpret_cast<DWORD_PTR>(this))) {
                 return false;
@@ -1095,7 +1225,7 @@ private:
 
     int Scale(int units) const { return MulDiv(units, dpi_, 96); }
     int Text(int units) const { return static_cast<int>(std::lround(units * textScale_)); }
-    int RowHeight() const { return Scale(Text(34) + 12); }
+    int RowHeight() const { return Scale(Text(48) + 17); }
 
     void RefreshTextSize() {
         const auto factor = systemTextSize_.Factor();
@@ -1115,11 +1245,11 @@ private:
         labelFont_ = CreateUiFont(Scale(Text(14)));
         smallFont_ = CreateUiFont(Scale(Text(12)));
         titleFont_ = CreateUiFont(Scale(Text(14)), FW_SEMIBOLD, L"Segoe UI Variable Display");
-        codeFont_ = CreateUiFont(Scale(Text(14)), FW_SEMIBOLD, L"Consolas");
+        codeFont_ = CreateUiFont(Scale(Text(20)), FW_SEMIBOLD, L"Consolas");
         iconFont_ = CreateUiFont(Scale(14), FW_NORMAL, L"Segoe Fluent Icons");
         strongFont_ = CreateUiFont(Scale(Text(14)), FW_SEMIBOLD);
         badgeFont_ = CreateUiFont(Scale(11), FW_SEMIBOLD);
-        for (const auto child : {tagFilter_, sortButton_, accountList_, importButton_}) {
+        for (const auto child : {tagFilter_, sortButton_, accountList_, importButton_, search_}) {
             SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(labelFont_), FALSE);
         }
         for (const auto child : {timerLabel_, emptyHint_, note_}) {
@@ -1155,8 +1285,10 @@ private:
                                      static_cast<int>(work.right - work.left) - Scale(20));
         const int content = (std::max)(1, width - 2 * gutter);
         const int iconButton = Scale(30);
-        const int header = (std::max)(iconButton, Scale(Text(21)));
-        const int controlsY = gutter + header + Scale(9);
+        const int titleHeight = Scale(Text(19));
+        const int searchHeight = (std::max)(Scale(33), Scale(Text(19) + 12));
+        const int searchY = gutter + titleHeight + Scale(6);
+        const int controlsY = searchY + searchHeight + Scale(9);
         const int command = Scale(Text(18) + 14);
         const bool hasAccounts = !accounts_.empty();
         const bool hasRows = accountCount_ > 0;
@@ -1165,21 +1297,31 @@ private:
         const int timerTextWidth = Scale(Text(russianUi ? 106 : 82));
         const int secondsWidth = preferences_.showCountdown ? Scale(Text(48)) : 0;
         const bool stackedTimer = content < timerTextWidth + secondsWidth + Scale(96);
-        const int timerHeight = hasRows ? timerLine + Scale(stackedTimer ? 38 : 26) : Scale(12);
-        const int footerHeight = timerHeight + gutter;
+        const int timerHeight = hasAccounts ? timerLine + Scale(stackedTimer ? 28 : 17) : Scale(7);
+        const int footerHeight = timerHeight + iconButton + gutter;
         const int workHeight = work.bottom - work.top - Scale(20);
         const int rowsThatFit = std::clamp((workHeight - listY - footerHeight) / RowHeight(), 1, 6);
-        const int listHeight = hasRows ? (std::min)(accountCount_, rowsThatFit) * RowHeight() :
-            Scale(Text(64) + 36) + (hasAccounts ? 0 : command);
+        const int rowSlots = searchQuery_.empty() ? accountCount_ : static_cast<int>(accounts_.size());
+        const int emptyHeight = Scale(Text(64) + 36) + (hasAccounts ? 0 : command);
+        const int listHeight = hasRows ? (std::min)(rowSlots, rowsThatFit) * RowHeight() :
+            (std::max)(emptyHeight, (std::min)(rowSlots, rowsThatFit) * RowHeight());
         const int listBottom = listY + listHeight;
         const auto place = [](HWND child, int x, int y, int w, int h) {
             MoveWindow(child, x, y, (std::max)(1, w), (std::max)(1, h), FALSE);
         };
 
-        place(title_, gutter, gutter, content - 3 * iconButton - Scale(8), header);
-        const int actionsY = gutter + (header - iconButton) / 2;
-        place(settings_, gutter + content - 2 * iconButton, actionsY, iconButton, iconButton);
-        place(edit_, gutter + content - 3 * iconButton, actionsY, iconButton, iconButton);
+        place(title_, gutter, gutter, content, titleHeight);
+        const int searchWidth = content - searchHeight - Scale(8);
+        searchBounds_ = {gutter, searchY, gutter + searchWidth, searchY + searchHeight};
+        const int editHeight = Scale(Text(20));
+        place(search_, gutter + Scale(30), searchY + (searchHeight - editHeight) / 2,
+              searchWidth - Scale(38), editHeight);
+        place(addButton_, gutter + content - searchHeight, searchY, searchHeight, searchHeight);
+
+        const int actionsY = listBottom + timerHeight;
+        place(settings_, gutter, actionsY, iconButton, iconButton);
+        place(edit_, gutter + iconButton + Scale(3), actionsY, iconButton, iconButton);
+        place(favorites_, gutter + 2 * (iconButton + Scale(3)), actionsY, iconButton, iconButton);
         place(close_, gutter + content - iconButton, actionsY, iconButton, iconButton);
 
         const int sortWidth = (std::min)(Scale(Text(110) + 38), content / 2);
@@ -1202,7 +1344,7 @@ private:
         const int hintBottom = hasAccounts ? listBottom : importY;
         place(emptyHint_, gutter + emptyInset, emptyHintY, content - 2 * emptyInset, hintBottom - emptyHintY - Scale(6));
 
-        const int timerY = listBottom + Scale(14);
+        const int timerY = listBottom + Scale(9);
         footerSeparator_ = {gutter, listBottom + Scale(3), gutter + content, listBottom + Scale(4)};
         place(timerLabel_, gutter, timerY, timerTextWidth, timerLine);
         place(countdown_, gutter + content - secondsWidth, timerY, secondsWidth, timerLine);
@@ -1213,7 +1355,7 @@ private:
             place(progress_, gutter + timerTextWidth, timerY + (timerLine - progressHeight) / 2,
                   content - timerTextWidth - secondsWidth - (secondsWidth ? Scale(12) : 0), progressHeight);
         }
-        PositionNote(width, listBottom + footerHeight);
+        PositionNote(width);
 
         RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
         return {width, listBottom + footerHeight};
@@ -1244,6 +1386,8 @@ private:
         const auto old = std::exchange(preferences_, updated);
         if (updated.russian != old.russian) {
             russianUi = updated.russian;
+            InvalidateRect(search_, nullptr, TRUE);
+            SetWindowTextW(addButton_, Ui(L"Add account"));
             SetWindowTextW(settings_, Ui(L"Settings"));
             SetWindowTextW(close_, Ui(L"Close"));
             SetWindowTextW(edit_, Ui(editing_ ? L"Finish editing" : L"Edit accounts"));
@@ -1284,6 +1428,10 @@ private:
         RECT frame{};
         GetClientRect(window_, &frame);
         FillSurface(dc, frame, palette_.surface);
+        PaintRounded(dc, searchBounds_, Scale(8), palette_.card, GetFocus() == search_ ? palette_.accent : palette_.stroke);
+        const RECT searchIcon{searchBounds_.left + Scale(3), searchBounds_.top,
+                              searchBounds_.left + Scale(29), searchBounds_.bottom};
+        PaintText(dc, L"\ue721", searchIcon, iconFont_, palette_.muted, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         if (accountCount_) {
             FillSurface(dc, footerSeparator_, palette_.stroke);
         } else {
@@ -1307,8 +1455,10 @@ private:
         const bool focused = (item.itemState & (ODS_FOCUS | ODS_NOFOCUSRECT)) == ODS_FOCUS;
         const bool closing = item.CtlID == kClose;
         const bool editButton = item.CtlID == kEditButton;
-        const bool editActive = editButton && editing_;
-        const bool headerButton = closing || item.CtlID == kSettings || editButton;
+        const bool favoriteButton = item.CtlID == kFavoritesButton;
+        const bool add = item.CtlID == kAddButton;
+        const bool active = (editButton && editing_) || (favoriteButton && favoritesOnly_);
+        const bool headerButton = closing || item.CtlID == kSettings || editButton || favoriteButton;
         const bool disabled = (item.itemState & ODS_DISABLED) != 0;
         const auto feedback = std::ranges::find(buttonFeedback_, item.hwndItem, &ButtonFeedback::window);
         const int hover = disabled || feedback == buttonFeedback_.end() ? 0 :
@@ -1316,23 +1466,24 @@ private:
                           feedback->fade.Value(GetTickCount64());
         const bool importing = item.CtlID == kImportButton;
         const bool unlock = importing && localVaultExists_ && !localVault_.Unlocked();
-        const bool accent = importing && !disabled && !palette_.highContrast;
-        const auto base = editActive ? palette_.selected : accent ? palette_.accent : headerButton ? palette_.surface : palette_.button;
+        const bool accent = (importing || add) && !disabled && !palette_.highContrast;
+        const auto base = active ? palette_.selected : accent ? palette_.accent : headerButton ? palette_.surface : palette_.button;
         const auto fill = accent ? BlendColor(base, AccentText(base), pressed ? 16 : hover / 10) :
                           pressed ? palette_.pressed : BlendColor(base, palette_.hover, hover);
         const auto ink = disabled ? palette_.disabledText : accent ? AccentText(fill) :
                          palette_.highContrast && (pressed || hover) ? palette_.selectionText : palette_.buttonText;
         FillSurface(dc, rect, importing ? palette_.card : palette_.surface);
-        if (!headerButton || editActive || (!disabled && (hover || pressed))) {
-            PaintRounded(dc, rect, Scale(4), fill, headerButton && !palette_.highContrast ? fill : palette_.stroke);
+        if (!headerButton || active || (!disabled && (hover || pressed))) {
+            PaintRounded(dc, rect, Scale(add ? 8 : 5), fill, headerButton && !palette_.highContrast ? fill : palette_.stroke);
         }
         if (focused) {
             PaintFocus(dc, rect, Scale(1), palette_.focusOuter, palette_.focusInner);
         }
         constexpr UINT centered = DT_CENTER | DT_VCENTER | DT_SINGLELINE;
-        if (headerButton) {
-            PaintText(dc, closing ? L"\ue711" : editButton ? L"\ue70f" : L"\ue713", rect, iconFont_,
-                      editActive && palette_.highContrast ? palette_.selectionText : ink, centered);
+        if (headerButton || add) {
+            const auto icon = favoriteButton ? (favoritesOnly_ ? L"\ue735" : L"\ue734") :
+                add ? L"\ue710" : closing ? L"\ue711" : editButton ? L"\ue70f" : L"\ue713";
+            PaintText(dc, icon, rect, iconFont_, active && palette_.highContrast ? palette_.selectionText : ink, centered);
             return;
         }
 
@@ -1360,7 +1511,7 @@ private:
         if (item.itemID == static_cast<UINT>(-1) || item.itemData >= accounts_.size()) {
             return;
         }
-        row.bottom -= Scale(4);
+        row.bottom -= Scale(5);
         const bool selected = (item.itemState & ODS_SELECTED) != 0;
         const bool focused = (item.itemState & (ODS_FOCUS | ODS_NOFOCUSRECT)) == ODS_FOCUS;
         const bool dragged = !preview && drag_ && drag_->moving && drag_->source == item.itemID;
@@ -1373,7 +1524,11 @@ private:
         if (inverted) {
             fill = palette_.selected;
         }
-        const auto ink = inverted ? palette_.selectionText : palette_.text;
+        if (editing_ && !palette_.highContrast) {
+            fill = BlendColor(fill, palette_.surface, 48);
+        }
+        const auto ink = inverted ? palette_.selectionText :
+            editing_ && !palette_.highContrast ? palette_.muted : palette_.text;
         const auto muted = inverted ? ink : palette_.muted;
         if (dragged) {
             fill = palette_.surface;
@@ -1387,10 +1542,10 @@ private:
         const auto accountAccent = palette_.highContrast ? fill :
             TagMarkerColor(NameColorHash(colorName) >> 24, palette_);
         std::optional<COLORREF> gradientEnd;
-        if (!palette_.highContrast && !dragged && !hovered && !selected) {
-            gradientEnd = AccountTint(fill, accountAccent, muted, palette_.dark ? 24 : 19);
+        if (!palette_.highContrast && !dragged && !hovered && !selected && !editing_) {
+            gradientEnd = AccountTint(fill, accountAccent, muted, palette_.dark ? 17 : 13);
         }
-        PaintRounded(dc, row, Scale(6), fill, border, gradientEnd);
+        PaintRounded(dc, row, Scale(9), fill, border, gradientEnd);
         if (dragged) {
             if (focused) {
                 PaintFocus(dc, row, Scale(1), palette_.focusOuter, palette_.focusInner);
@@ -1438,39 +1593,64 @@ private:
             }
         }
         const int iconLeft = row.left + Scale(draggable ? 32 : 12);
-        const int iconTop = center - Scale(11);
-        const RECT badge{iconLeft, iconTop, iconLeft + Scale(22), iconTop + Scale(22)};
+        const int iconTop = center - Scale(15);
+        const RECT badge{iconLeft, iconTop, iconLeft + Scale(30), iconTop + Scale(30)};
         constexpr UINT centered = DT_SINGLELINE | DT_VCENTER | DT_CENTER;
         if (!palette_.highContrast) {
             const auto badgeFill = AccountTint(palette_.surface, accountAccent, palette_.text, 32);
-            PaintRounded(dc, badge, Scale(6), badgeFill, badgeFill);
+            const auto toned = editing_ ? BlendColor(badgeFill, palette_.surface, 55) : badgeFill;
+            PaintRounded(dc, badge, Scale(8), toned, toned);
         }
         const auto badgeInk = palette_.highContrast ? ink : palette_.text;
         PaintText(dc, monogram.empty() ? std::wstring_view(L"\uea18") : std::wstring_view(monogram),
                   badge, monogram.empty() ? iconFont_ : badgeFont_, badgeInk, centered);
 
-        const RECT copy{row.right - Scale(28), center - Scale(11), row.right - Scale(6), center + Scale(11)};
-        if (hovered && !palette_.highContrast) {
-            const auto copyFill = pressed ? palette_.surface : palette_.button;
-            PaintRounded(dc, copy, Scale(4), copyFill, copyFill);
+        const auto action = RowActionBounds(row);
+        const auto name = AccountDisplayName(account.issuer, account.label);
+        const int textLeft = badge.right + Scale(10);
+        const auto star = FavoriteBounds(row);
+        const int textRight = (editing_ || account.favorite ? star.left : action.left) - Scale(6);
+        constexpr UINT labelStyle = DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
+        const int providerHeight = Scale(Text(16));
+        const int codeHeight = Scale(Text(22));
+        const int accountHeight = Scale(Text(14));
+        const bool showAccountName = !account.issuer.empty() && !SameName(account.issuer, name);
+        const int textTop = center - (providerHeight + codeHeight + (showAccountName ? accountHeight : 0)) / 2;
+        const int codeTop = textTop + providerHeight;
+
+        PaintText(dc, account.issuer.empty() ? name : std::wstring_view(account.issuer),
+                  {textLeft, textTop, textRight, codeTop}, strongFont_, ink, labelStyle);
+        if (showAccountName) {
+            PaintText(dc, name, {textLeft, codeTop + codeHeight, textRight, codeTop + codeHeight + accountHeight},
+                      smallFont_, muted, labelStyle);
         }
-        PaintText(dc, L"\ue8c8", copy, iconFont_, hovered ? ink : muted, centered);
-        const int codeRight = copy.left - Scale(4);
-        const int codeHalfHeight = Scale(Text(8) + 3);
-        const RECT codeBounds{codeRight - Scale(Text(76) + 6), center - codeHalfHeight,
-                              codeRight, center + codeHalfHeight};
+        const RECT codeBounds{textLeft, codeTop, textRight, codeTop + codeHeight};
+        if (editing_) {
+            const auto paintAction = [&](const RECT& bounds, RowAction kind, PCWSTR icon, bool starred) {
+                const bool active = rowActionPressed_ && rowActionPressed_->first == item.itemData &&
+                                    rowActionPressed_->second == kind;
+                const auto buttonFill = active ? palette_.pressed : starred ? palette_.selected : palette_.button;
+                PaintRounded(dc, bounds, Scale(7), buttonFill, palette_.highContrast ? palette_.stroke : buttonFill);
+                const auto color = starred ? (palette_.highContrast ? palette_.selectionText : palette_.accent) :
+                                             palette_.buttonText;
+                PaintText(dc, icon, bounds, iconFont_, color, centered);
+            };
+            paintAction(star, RowAction::Favorite, account.favorite ? L"\ue735" : L"\ue734", account.favorite);
+            paintAction(action, RowAction::Remove, L"\ue711", false);
+        } else {
+            if (hovered && !palette_.highContrast) {
+                const auto copyFill = pressed ? palette_.surface : palette_.button;
+                PaintRounded(dc, action, Scale(7), copyFill, copyFill);
+            }
+            PaintText(dc, L"\ue8c8", action, iconFont_, hovered ? ink : muted, centered);
+            if (account.favorite) {
+                PaintText(dc, L"\ue735", star, iconFont_, muted, centered);
+            }
+        }
         if (copied) {
-            const auto badge = palette_.highContrast ? palette_.accent :
-                BlendColor(palette_.accent, AccentText(palette_.accent), copyPulseAmount_);
-            const auto badgeText = palette_.highContrast ? palette_.selectionText : AccentText(badge);
-            PaintRounded(dc, codeBounds, Scale(6), badge, badge);
-            const auto groupWidth = Scale(Text(40) + 24);
-            const LONG origin = (codeBounds.left + codeBounds.right - groupWidth) / 2;
-            RECT tick{origin, codeBounds.top, origin + Scale(18), codeBounds.bottom};
-            OffsetRect(&tick, 0, Scale(copyPulseAmount_ / 6));
-            PaintText(dc, L"\ue73e", tick, iconFont_, badgeText, centered);
-            RECT confirmation{tick.right + Scale(4), codeBounds.top, codeBounds.right, codeBounds.bottom};
-            PaintText(dc, Ui(L"Copied"), confirmation, smallFont_, badgeText, DT_SINGLELINE | DT_VCENTER);
+            const auto color = palette_.highContrast ? ink :
+                BlendColor(palette_.accent, ink, copyPulseAmount_);
+            PaintText(dc, Ui(L"Copied"), codeBounds, strongFont_, color, labelStyle);
         } else {
             const auto code = !preview && preferences_.showCodes &&
                 (displayProtected_ || preferences_.allowScreenshots) && displayedSecond_ >= 0 ?
@@ -1481,26 +1661,8 @@ private:
                 digits[i + (i >= half)] = code ? code->text[i] : L'\u2022';
             }
             digits[half] = L'\u2002';
-            if (!palette_.highContrast) {
-                const auto well = BlendColor(fill, palette_.surface, 85);
-                PaintRounded(dc, codeBounds, Scale(6), well, well);
-            }
-            PaintText(dc, digits, codeBounds, codeFont_, code ? ink : muted, centered);
+            PaintText(dc, digits, codeBounds, codeFont_, code ? ink : muted, labelStyle);
             SecureZeroMemory(digits, sizeof(digits));
-        }
-
-        const int textLeft = badge.right + Scale(8);
-        const int textRight = codeBounds.left - Scale(6);
-        const auto name = AccountDisplayName(account.issuer, account.label);
-        constexpr UINT labelStyle = DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
-        if (account.issuer.empty()) {
-            PaintText(dc, name, {textLeft, row.top, textRight, row.bottom}, strongFont_, ink, labelStyle);
-        } else {
-            const int firstLineTop = center - Scale(Text(18));
-            PaintText(dc, account.issuer, {textLeft, firstLineTop, textRight, center + Scale(1)}, strongFont_, ink,
-                      labelStyle);
-            PaintText(dc, name, {textLeft, center + Scale(1), textRight, center + Scale(Text(17))},
-                      smallFont_, muted, labelStyle);
         }
         if (!preview && drag_ && drag_->moving && drag_->target == item.itemID && drag_->target != drag_->source) {
             const auto y = drag_->target < drag_->source ? row.top : row.bottom - Scale(2);
@@ -1729,6 +1891,7 @@ private:
     }
 
     void ShowFlyout(bool activate = true) {
+        KillTimer(window_, kDeactivateTimer);
         const bool wasVisible = IsWindowVisible(window_) && motion_ != Motion::Leaving;
         UpdateCaptureProtection();
         anchor_ = IconRect();
@@ -1752,7 +1915,7 @@ private:
         if (activate && (SetForegroundWindow(window_) || GetForegroundWindow() == window_)) {
             previewVisible_ = false;
             if (!wasVisible || !IsChild(window_, GetFocus())) {
-                SetFocus(accounts_.empty() ? importButton_ : editing_ ? tagFilter_ : accountList_);
+                SetFocus(accounts_.empty() ? importButton_ : search_);
             }
         }
         SetTimer(window_, kTimer, 250, nullptr);
@@ -1781,6 +1944,7 @@ private:
 
     void HideFlyout() {
         ShowWindow(window_, SW_HIDE);
+        KillTimer(window_, kDeactivateTimer);
         motion_ = Motion::Idle;
         KillTimer(window_, kTimer);
         KillTimer(window_, kMotionTimer);
@@ -1851,6 +2015,30 @@ private:
         return command;
     }
 
+    void HandleTrayClick(UINT notification) {
+        const auto now = GetTickCount64();
+        if (lastTrayClick_ && lastTrayClick_ != notification &&
+            now - lastTrayClickAt_ <= GetDoubleClickTime()) {
+            // Explorer can report a mouse release as well as a selection for one click.
+            lastTrayClick_ = 0;
+            return;
+        }
+        lastTrayClick_ = notification;
+        lastTrayClickAt_ = now;
+        ToggleFromTray();
+    }
+
+    void ToggleFromTray() {
+        if (handlingCommand_ || !sessionAvailable_) {
+            return;
+        }
+        if (IsWindowVisible(window_)) {
+            HideFlyout();
+        } else {
+            ShowFlyout();
+        }
+    }
+
     void ShowTrayMenu() {
         if (handlingCommand_) {
             return;
@@ -1899,6 +2087,8 @@ private:
     }
 
     PCWSTR SortPreference() const { return standalone_ ? L"AccountSort" : L"ModAccountSort"; }
+
+    PCWSTR FavoritesPreference() const { return standalone_ ? L"FavoritesOnly" : L"ModFavoritesOnly"; }
 
     std::optional<std::wstring_view> TagFilter() const {
         return filter_ ? std::optional<std::wstring_view>(*filter_) : std::nullopt;
@@ -1985,13 +2175,14 @@ private:
 
     void RefreshList() {
         EndRowDrag();
+        rowActionPressed_.reset();
         changedRow_.reset();
         StopCopyPulse();
         hoverRow_.reset();
         SendMessageW(accountList_, WM_SETREDRAW, FALSE, 0);
         SendMessageW(accountList_, LB_RESETCONTENT, 0, 0);
         int rowToSelect = 0;
-        const auto rows = AccountRows(accounts_, TagFilter(), sort_);
+        const auto rows = AccountRows(accounts_, TagFilter(), sort_, searchQuery_, favoritesOnly_);
         for (const auto i : rows) {
             const auto& account = accounts_[i];
             const auto label = AccountDisplayName(account.issuer, account.label);
@@ -2018,6 +2209,10 @@ private:
         accountCount_ = count > 0 ? static_cast<int>(count) : 0;
         const bool hasRows = accountCount_ > 0;
         const bool hasAccounts = !accounts_.empty();
+        const bool noFavorites = favoritesOnly_ && hasAccounts && !std::ranges::any_of(accounts_, &Account::favorite);
+        SetWindowTextW(favorites_, Ui(favoritesOnly_ ? L"Show all accounts" : L"Show favorites only"));
+        EnableWindow(favorites_, hasAccounts || favoritesOnly_);
+        InvalidateRect(favorites_, nullptr, FALSE);
         const bool showToolbar = editing_ && hasAccounts;
         const bool hadToolbar = (GetWindowLongW(tagFilter_, GWL_STYLE) & WS_VISIBLE) != 0;
         const auto focus = GetFocus();
@@ -2035,13 +2230,17 @@ private:
         }
         ShowWindow(importButton_, hasAccounts ? SW_HIDE : SW_SHOWNA);
         const bool vaultLocked = localVaultExists_ && !localVault_.Unlocked();
+        EnableWindow(search_, hasAccounts);
+        EnableWindow(addButton_, !vaultLocked);
         SetWindowTextW(importButton_, Ui(vaultLocked ? L"Unlock vault" : L"Import accounts"));
         EnableWindow(importButton_, !vaultLocked || (sessionAvailable_ && sessionNotifications_));
         UpdateFooterVisibility();
         if (!hasRows) {
-            SetWindowTextW(emptyTitle_, Ui(hasAccounts ? L"No matching accounts" :
+            SetWindowTextW(emptyTitle_, Ui(noFavorites ? L"No favorite accounts" : hasAccounts ? L"No matching accounts" :
                            vaultLocked ? L"Local vault is locked" : L"No accounts open"));
-            SetWindowTextW(emptyHint_, Ui(hasAccounts ? L"Choose All tags to see your accounts." : vaultLocked ?
+            SetWindowTextW(emptyHint_, Ui(noFavorites ? L"Mark accounts with a star in edit mode." :
+                hasAccounts ? (searchQuery_.empty() ? L"Choose All tags to see your accounts." :
+                                         L"Try another service, account name, or tag.") : vaultLocked ?
                 (LocalVault::IsWindowsProtected(vaultPath_) ? L"Use your Windows account to unlock the vault." :
                                                              L"Enter your master password to open your accounts.") :
                               L"Import setup links or restore an encrypted backup."));
@@ -2067,8 +2266,21 @@ private:
         InvalidateRect(edit_, nullptr, FALSE);
     }
 
+    void ToggleSelectedFavorite() {
+        if (!selected_ || *selected_ >= accounts_.size()) {
+            return;
+        }
+        auto proposed = accounts_;
+        auto& favorite = proposed[*selected_].favorite;
+        favorite = !favorite;
+        if (SaveAccounts(std::move(proposed))) {
+            lastActivity_ = GetTickCount64();
+            RefreshList();
+        }
+    }
+
     void ReorderRows(LRESULT sourceRow, LRESULT targetRow) {
-        if (!editing_ || sort_ != AccountSort::Manual || sourceRow < 0 || targetRow < 0 ||
+        if (!CanDragRows() || sourceRow < 0 || targetRow < 0 ||
             sourceRow >= accountCount_ || targetRow >= accountCount_) {
             return;
         }
@@ -2106,16 +2318,17 @@ private:
         }
     }
 
-    void PositionNote(int width, int height) const {
+    void PositionNote(int width) const {
         const int gutter = Scale(kGutter);
         const int toastWidth = (std::max)(1, width - 2 * gutter);
-        const int toastHeight = MeasureNoteHeight(toastWidth - Scale(24)) + Scale(12);
-        SetWindowPos(note_, HWND_TOP, gutter, (std::max)(0, height - gutter - toastHeight),
+        const int toastBottom = (std::max)(1, static_cast<int>(footerSeparator_.top) - Scale(7));
+        const int toastHeight = (std::min)(toastBottom, MeasureNoteHeight(toastWidth - Scale(24)) + Scale(12));
+        SetWindowPos(note_, HWND_TOP, gutter, toastBottom - toastHeight,
                      toastWidth, toastHeight, SWP_NOACTIVATE);
     }
 
     void UpdateFooterVisibility() const {
-        const bool showTimer = accountCount_ > 0 && noteText_.empty();
+        const bool showTimer = accountCount_ > 0;
         ShowWindow(timerLabel_, showTimer ? SW_SHOWNA : SW_HIDE);
         ShowWindow(countdown_, showTimer && preferences_.showCountdown ? SW_SHOWNA : SW_HIDE);
         ShowWindow(progress_, showTimer ? SW_SHOWNA : SW_HIDE);
@@ -2131,8 +2344,7 @@ private:
         }
         RECT client{};
         GetClientRect(window_, &client);
-        UpdateFooterVisibility();
-        PositionNote(client.right, client.bottom);
+        PositionNote(client.right);
         ShowWindow(note_, SW_SHOWNA);
         InvalidateRect(note_, nullptr, FALSE);
         NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, note_, OBJID_CLIENT, CHILDID_SELF);
@@ -2143,11 +2355,11 @@ private:
         noteText_.clear();
         SetWindowTextW(note_, L"");
         ShowWindow(note_, SW_HIDE);
-        UpdateFooterVisibility();
     }
 
     void StopCopyPulse() {
         KillTimer(window_, kCopyPulseTimer);
+        KillTimer(window_, kCopyConfirmationTimer);
         InvalidateRow(std::exchange(copyPulseRow_, std::nullopt));
     }
 
@@ -2172,9 +2384,9 @@ private:
     }
 
     void ShowCopyFeedback() {
-        SetNote(L"Code copied.", kCopyConfirmationMs);
+        StopCopyPulse();
         const auto row = SendMessageW(accountList_, LB_GETCURSEL, 0, 0);
-        if (row >= 0) {
+        if (row >= 0 && SetTimer(window_, kCopyConfirmationTimer, kCopyConfirmationMs, nullptr)) {
             copyPulseRow_ = static_cast<UINT>(row);
             copyPulseStart_ = GetTickCount64();
             const bool animate = preferences_.animateCopy && MotionEnabled();
@@ -2355,8 +2567,8 @@ private:
         menu.Add(ImportVault, L"Restore encrypted backup...", state);
     }
 
-    void ShowImportAccounts() {
-        if (handlingCommand_ || !accounts_.empty()) {
+    void ShowImportAccounts(HWND anchor) {
+        if (handlingCommand_) {
             return;
         }
         handlingCommand_ = true;
@@ -2373,7 +2585,7 @@ private:
         menu.Separator();
         AddImportCommands(menu);
         RECT bounds{};
-        GetWindowRect(importButton_, &bounds);
+        GetWindowRect(anchor, &bounds);
         const auto action = TrackMenu(menu, {bounds.left, bounds.bottom}, &bounds);
         if (generation == lockGeneration_) {
             HandleAccountCommand(action);
@@ -2422,7 +2634,7 @@ private:
         }
     }
 
-    void RemoveSelectedAccount() {
+    void RemoveSelectedAccount(bool confirm = true) {
         const auto index = selected_;
         const auto account = SelectedAccount();
         if (!index || !account) {
@@ -2430,7 +2642,7 @@ private:
         }
         const auto name = account->issuer.empty() ? account->label : account->issuer + L" \u2014 " + account->label;
         const auto generation = lockGeneration_;
-        if (!ConfirmAccountRemoval(window_, name.c_str(), preferences_.theme) ||
+        if ((confirm && !ConfirmAccountRemoval(window_, name.c_str(), preferences_.theme)) ||
             generation != lockGeneration_ || *index >= accounts_.size()) {
             return;
         }
@@ -2890,6 +3102,9 @@ private:
         accounts_.clear();
         selected_.reset();
         filter_.reset();
+        if (!searchQuery_.empty()) {
+            SetWindowTextW(search_, L"");
+        }
         RefreshTags();
     }
 
@@ -2966,7 +3181,7 @@ private:
         }
         const auto previousSecond = std::exchange(displayedSecond_, now);
         const auto tag = TagFilter();
-        const auto next = now >= 0 ? NextRefresh(accounts_, tag, now) : std::nullopt;
+        const auto next = now >= 0 ? NextRefresh(accounts_, tag, now, searchQuery_, favoritesOnly_) : std::nullopt;
         wchar_t label[32]{};
         const unsigned left = next ? next->seconds : 0;
         const unsigned total = next ? next->period : 0;
@@ -3015,8 +3230,11 @@ private:
     UINT taskbarCreated_ = 0;
     HWND window_ = nullptr;
     HWND title_ = nullptr;
+    HWND search_ = nullptr;
+    HWND addButton_ = nullptr;
     HWND settings_ = nullptr;
     HWND edit_ = nullptr;
+    HWND favorites_ = nullptr;
     HWND close_ = nullptr;
     HWND tagFilter_ = nullptr;
     HWND sortButton_ = nullptr;
@@ -3026,7 +3244,7 @@ private:
         InteractionFade fade;
         bool animating = false;
     };
-    std::array<ButtonFeedback, 6> buttonFeedback_{};
+    std::array<ButtonFeedback, 8> buttonFeedback_{};
     std::optional<UINT> changedRow_;
     InteractionFade changedRowFade_;
     HWND accountList_ = nullptr;
@@ -3046,6 +3264,7 @@ private:
     HFONT strongFont_ = nullptr;
     HFONT badgeFont_ = nullptr;
     RECT emptyPanel_{};
+    RECT searchBounds_{};
     RECT footerSeparator_{};
     WindowsTextSize systemTextSize_;
     UINT dpi_ = 96;
@@ -3056,8 +3275,11 @@ private:
     int wheelDelta_ = 0;
     AccountSort sort_ = AccountSort::NameAscending;
     bool editing_ = false;
+    bool favoritesOnly_ = false;
     Palette palette_ = WindowsPalette(preferences_.theme, systemTextSize_);
     bool trayIconAdded_ = false;
+    UINT lastTrayClick_ = 0;
+    ULONGLONG lastTrayClickAt_ = 0;
     bool previewVisible_ = false;
     bool displayProtected_ = false;
     unsigned progressLeft_ = 0;
@@ -3077,9 +3299,11 @@ private:
     std::optional<ManualWindowPosition> manualPosition_;
     std::int64_t displayedSecond_ = -1;
     std::vector<Account> accounts_;
+    std::wstring searchQuery_;
     std::optional<std::wstring> filter_;
     std::optional<std::size_t> selected_;
     std::optional<std::size_t> copyPressed_;
+    std::optional<std::pair<std::size_t, RowAction>> rowActionPressed_;
     std::optional<RowDrag> drag_;
     std::optional<UINT> hoverRow_;
     std::optional<UINT> copyPulseRow_;

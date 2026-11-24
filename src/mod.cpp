@@ -2,7 +2,7 @@
 // @id              totp-flyout
 // @name            TOTP flyout
 // @description     TOTP tray flyout with account tags and encrypted backups
-// @version         0.3.1
+// @version         0.3.2
 // @author          wondersalmon
 // @github          https://github.com/wondersalmon
 // @include         windhawk.exe

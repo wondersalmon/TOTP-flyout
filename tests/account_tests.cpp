@@ -180,6 +180,7 @@ bool Backups() {
     account->tags = {L"Team \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u0435", L"Other"};
     std::vector<Account> original;
     account->tagColors[0] = RGB(12, 140, 180) + 1;
+    account->favorite = true;
     original.push_back(std::move(*account));
     auto encrypted = CreateBackup(original, kPassword);
     auto encryptedAgain = CreateBackup(original, kPassword);
@@ -192,7 +193,8 @@ bool Backups() {
     }
     auto restored = LoadBackup(*encrypted, kPassword);
     SecretBytes restoredSecret;
-    if (!restored || restored->size() != 1 || (*restored)[0].tags != original[0].tags ||
+    if (!restored || restored->size() != 1 || !restored->front().favorite ||
+        (*restored)[0].tags != original[0].tags ||
         (*restored)[0].tagColors != original[0].tagColors ||
         (*restored)[0].issuer != original[0].issuer || (*restored)[0].label != original[0].label ||
         (*restored)[0].digits != 8 || (*restored)[0].period != 60 ||
@@ -265,6 +267,7 @@ bool LocalVaultPersistence() {
         updated.front().tags = {L"Fixture tag"};
         updated.front().useCount = 6;
         updated.front().lastUsed = 2200000000000ull;
+        updated.front().favorite = true;
         const auto held = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (held == INVALID_HANDLE_VALUE) {
@@ -283,7 +286,8 @@ bool LocalVaultPersistence() {
         }
         auto reopened = second.Open(path, kPassword);
         SecretBytes decrypted;
-        if (!reopened || reopened->size() != 1 || reopened->front().label != updated.front().label ||
+        if (!reopened || reopened->size() != 1 || !reopened->front().favorite ||
+            reopened->front().label != updated.front().label ||
             reopened->front().tags != updated.front().tags || !reopened->front().secret.Read(decrypted) ||
             !std::ranges::equal(decrypted.View(), kPublicSecret) || reopened->front().useCount != updated.front().useCount ||
             reopened->front().lastUsed != updated.front().lastUsed || !second.UseWindowsProtection(*reopened) ||
@@ -292,7 +296,8 @@ bool LocalVaultPersistence() {
         }
         second.Lock();
         reopened = vault.Open(path, {});
-        if (!reopened || reopened->size() != 1 || reopened->front().lastUsed != updated.front().lastUsed ||
+        if (!reopened || reopened->size() != 1 || !reopened->front().favorite ||
+            reopened->front().lastUsed != updated.front().lastUsed ||
             !vault.Save({})) {
             return false;
         }

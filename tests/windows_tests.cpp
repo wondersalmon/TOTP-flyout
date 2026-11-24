@@ -240,12 +240,12 @@ bool ExerciseProviderRow(bool verifyCopy) {
     for (HWND label = nullptr; (label = FindWindowExW(flyout, label, L"STATIC", nullptr));) {
         wchar_t text[64]{};
         GetWindowTextW(label, text, ARRAYSIZE(text));
-        if (std::wstring_view(text) == L"Code copied." && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
-            return true;
+        if (std::wstring_view(text) == L"Code copied.") {
+            std::fputs("The copy confirmation showed a redundant notification.\n", stderr);
+            return false;
         }
     }
-    std::fputs("Clicking the account name did not copy a code and show confirmation.\n", stderr);
-    return false;
+    return IsClipboardFormatAvailable(CF_UNICODETEXT);
 }
 
 bool TestFlyoutEntryPoints() {
@@ -272,16 +272,38 @@ bool TestFlyoutEntryPoints() {
             break;
         }
     }
-    RECT beforeToast{}, afterToast{};
-    if (!toast || !IsWindowVisible(toast) || !progress || IsWindowVisible(progress) ||
-        !GetWindowRect(flyout, &beforeToast)) {
-        std::fputs("The unlock notification did not replace the countdown footer.\n", stderr);
+    RECT beforeToast{}, afterToast{}, toastBounds{}, listBounds{}, timerBefore{}, timerAfter{};
+    if (!toast || !IsWindowVisible(toast) || !progress || !IsWindowVisible(progress) ||
+        !GetWindowRect(flyout, &beforeToast) || !GetWindowRect(toast, &toastBounds) ||
+        !GetWindowRect(list, &listBounds) || !GetWindowRect(progress, &timerBefore) ||
+        toastBounds.bottom > listBounds.bottom || toastBounds.bottom > timerBefore.top) {
+        std::fputs("The unlock notification must appear above the visible countdown footer.\n", stderr);
         return false;
     }
     SendMessageW(flyout, WM_TIMER, 6, 0);
     if (IsWindowVisible(toast) || !IsWindowVisible(progress) || !GetWindowRect(flyout, &afterToast) ||
-        !EqualRect(&beforeToast, &afterToast)) {
-        std::fputs("Dismissing a toast must leave the flyout size unchanged.\n", stderr);
+        !GetWindowRect(progress, &timerAfter) || !EqualRect(&beforeToast, &afterToast) ||
+        !EqualRect(&timerBefore, &timerAfter)) {
+        std::fputs("Dismissing a toast must leave the flyout and countdown in place.\n", stderr);
+        return false;
+    }
+    const auto search = GetDlgItem(flyout, 111);
+    const auto add = GetDlgItem(flyout, 112);
+    if (!search || !add || !IsWindowVisible(search) || !IsWindowVisible(add)) {
+        std::fputs("The search and add controls were missing.\n", stderr);
+        return false;
+    }
+    SetWindowTextW(search, L"  gItLaB  ");
+    const bool providerMatch = SendMessageW(list, LB_GETCOUNT, 0, 0) == 1 && IsWindowVisible(progress);
+    SetWindowTextW(search, L"second fixture");
+    const bool labelMatch = SendMessageW(list, LB_GETCOUNT, 0, 0) == 1;
+    SetWindowTextW(search, L"fixture tag");
+    const bool tagMatch = SendMessageW(list, LB_GETCOUNT, 0, 0) == 6;
+    SetWindowTextW(search, L"no matching test account");
+    const bool empty = SendMessageW(list, LB_GETCOUNT, 0, 0) == 0 && !IsWindowVisible(progress);
+    SetWindowTextW(search, L"");
+    if (!providerMatch || !labelMatch || !tagMatch || !empty || SendMessageW(list, LB_GETCOUNT, 0, 0) != 7) {
+        std::fputs("Search did not filter by provider, account name and tag or restore the list.\n", stderr);
         return false;
     }
     RECT rows{};
@@ -415,10 +437,17 @@ void CALLBACK TestEmptyFlyout(HWND, UINT, UINT_PTR timer, DWORD) {
     if (activeTrayTest->passed) {
         SendMessageW(window, WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK, 0);
         ShowWindow(window, SW_HIDE);
+        SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONDOWN);
         SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONUP);
+        SendMessageW(window, WM_APP + 1, 0, NIN_SELECT);
         const auto opened = IsWindowVisible(window);
+        SendMessageW(window, WM_ACTIVATE, WA_ACTIVE, 0);
+        SendMessageW(window, WM_ACTIVATE, WA_INACTIVE, 0);
+        SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONDOWN);
+        SendMessageW(window, WM_APP + 1, 0, NIN_SELECT);
         SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONUP);
         const auto hidden = !IsWindowVisible(window);
+        SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONDOWN);
         SendMessageW(window, WM_APP + 1, 0, WM_LBUTTONUP);
         activeTrayTest->passed = opened && hidden && IsWindowVisible(window);
         if (!activeTrayTest->passed) {
@@ -445,6 +474,42 @@ void CALLBACK TestRowCopy(HWND, UINT, UINT_PTR timer, DWORD) {
         std::fputs("The isolated flyout could not unlock the fixture vault.\n", stderr);
     } else {
         activeTrayTest->passed = TestFlyoutEntryPoints() && ExerciseProviderRow(activeTrayTest->verifyCopy);
+        if (activeTrayTest->passed) {
+            const auto list = GetDlgItem(window, 102);
+            SendMessageW(list, LB_SETTOPINDEX, 0, 0);
+            RECT row{};
+            SendMessageW(list, LB_GETITEMRECT, 0, reinterpret_cast<LPARAM>(&row));
+            const auto dpi = GetDpiForWindow(list);
+            const auto x = row.right - MulDiv(24, dpi, 96);
+            const auto y = (row.top + row.bottom) / 2;
+            const auto star = MAKELPARAM(row.right - MulDiv(58, dpi, 96), y);
+            SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON, star);
+            SendMessageW(list, WM_LBUTTONUP, 0, star);
+            const auto favorites = GetDlgItem(window, 113);
+            const auto preference = activeTrayTest->standalone ? L"FavoritesOnly" : L"ModFavoritesOnly";
+            SendMessageW(window, WM_COMMAND, MAKEWPARAM(113, BN_CLICKED), reinterpret_cast<LPARAM>(favorites));
+            const bool oneFavorite = favorites && SendMessageW(list, LB_GETCOUNT, 0, 0) == 1 &&
+                twofa::ReadPreference(preference, 0) == 1;
+            SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON, star);
+            SendMessageW(list, WM_LBUTTONUP, 0, star);
+            const bool cleared = SendMessageW(list, LB_GETCOUNT, 0, 0) == 0;
+            SendMessageW(window, WM_COMMAND, MAKEWPARAM(113, BN_CLICKED), reinterpret_cast<LPARAM>(favorites));
+            if (!oneFavorite || !cleared || SendMessageW(list, LB_GETCOUNT, 0, 0) != 7 ||
+                twofa::ReadPreference(preference, 1) != 0) {
+                std::fputs("The star and favorites filter did not add, remove, and restore accounts.\n", stderr);
+                SetEvent(activeTrayTest->stop);
+                return;
+            }
+            SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+            SendMessageW(list, WM_LBUTTONUP, 0, MAKELPARAM(0, y));
+            const bool dragCancelled = SendMessageW(list, LB_GETCOUNT, 0, 0) == 7;
+            SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+            SendMessageW(list, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+            activeTrayTest->passed = dragCancelled && SendMessageW(list, LB_GETCOUNT, 0, 0) == 6;
+            if (!activeTrayTest->passed) {
+                std::fputs("The edit-mode cross did not delete on click or deleted on drag.\n", stderr);
+            }
+        }
     }
     SetEvent(activeTrayTest->stop);
 }

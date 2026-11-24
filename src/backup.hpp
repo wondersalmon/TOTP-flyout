@@ -18,8 +18,11 @@ namespace backup {
 inline constexpr std::array<std::uint8_t, 8> kLegacyMagic{'2', 'F', 'A', 'V', 'L', 'T', '0', '1'};
 inline constexpr std::array<std::uint8_t, 8> kTagsMagic{'2', 'F', 'A', 'V', 'L', 'T', '0', '2'};
 inline constexpr std::array<std::uint8_t, 8> kMagic{'2', 'F', 'A', 'V', 'L', 'T', '0', '3'};
+inline constexpr std::array<std::uint8_t, 8> kFavoritesMagic{'2', 'F', 'A', 'V', 'L', 'T', '0', '4'};
 inline constexpr std::array<std::uint8_t, 8> kLocalMagic{'2', 'F', 'A', 'L', 'V', 'T', '0', '4'};
+inline constexpr std::array<std::uint8_t, 8> kLocalFavoritesMagic{'2', 'F', 'A', 'L', 'V', 'T', '0', '5'};
 inline constexpr std::array<std::uint8_t, 8> kWindowsVaultMagic{'2', 'F', 'A', 'D', 'P', 'A', '0', '1'};
+inline constexpr std::array<std::uint8_t, 8> kWindowsFavoritesMagic{'2', 'F', 'A', 'D', 'P', 'A', '0', '2'};
 inline constexpr std::size_t kSaltSize = 16;
 inline constexpr std::size_t kNonceSize = 12;
 inline constexpr std::size_t kTagSize = 16;
@@ -27,9 +30,9 @@ inline constexpr std::size_t kHeaderSize = kMagic.size() + kSaltSize + kNonceSiz
 inline constexpr std::size_t kMaxLegacyPayloadSize = 2 + kMaxAccounts * (12 + 6 * kMaxNameLength + kMaxSecretLength);
 inline constexpr std::size_t kMaxPayloadSize = 2 + kMaxAccounts *
     (12 + 4 * kMaxNameLength + kMaxTags * (6 + 2 * kMaxNameLength) + kMaxSecretLength);
-inline constexpr std::size_t kMaxFileSize = kHeaderSize + kMaxPayloadSize + kTagSize;
+inline constexpr std::size_t kMaxFileSize = kHeaderSize + kMaxPayloadSize + kMaxAccounts + kTagSize;
 inline constexpr std::size_t kUsageSize = sizeof(std::uint32_t) + sizeof(std::uint64_t);
-inline constexpr std::size_t kMaxLocalPayloadSize = kMaxPayloadSize + kMaxAccounts * kUsageSize;
+inline constexpr std::size_t kMaxLocalPayloadSize = kMaxPayloadSize + kMaxAccounts * (kUsageSize + 1);
 inline constexpr std::size_t kMaxLocalFileSize = kMaxLocalPayloadSize + 4096;
 inline constexpr ULONGLONG kIterations = 600000;
 
@@ -141,7 +144,7 @@ private:
 };
 
 inline std::optional<std::vector<Account>> Deserialize(std::span<const std::uint8_t> bytes, unsigned version = 3,
-                                                       bool allowEmpty = false) {
+                                                       bool allowEmpty = false, bool hasFavorites = false) {
     PayloadReader reader(bytes);
     const auto count = reader.ReadUint16();
     if (!reader.Good() || (!allowEmpty && count == 0) || count > kMaxAccounts) {
@@ -188,6 +191,13 @@ inline std::optional<std::vector<Account>> Deserialize(std::span<const std::uint
             account.useCount = static_cast<std::uint32_t>(reader.ReadUnsigned(sizeof(account.useCount)));
             account.lastUsed = reader.ReadUnsigned(sizeof(account.lastUsed));
         }
+        if (hasFavorites) {
+            const auto favorite = reader.ReadUnsigned(1);
+            if (favorite > 1) {
+                return std::nullopt;
+            }
+            account.favorite = favorite == 1;
+        }
         SecretBytes decoded;
         std::ranges::copy(secret, decoded.data.begin());
         decoded.size = secret.size();
@@ -200,12 +210,12 @@ inline std::optional<std::vector<Account>> Deserialize(std::span<const std::uint
 }
 
 inline bool Serialize(std::span<const Account> accounts, Plaintext& plaintext, bool allowEmpty = false,
-                      bool includeUsage = false) {
+                      bool includeUsage = false, bool includeFavorites = false) {
     if (!plaintext.bytes.empty() || (!allowEmpty && accounts.empty()) || accounts.size() > kMaxAccounts ||
         !std::ranges::all_of(accounts, ValidAccount)) {
         return false;
     }
-    std::size_t size = 2 + (includeUsage ? accounts.size() * kUsageSize : 0);
+    std::size_t size = 2 + accounts.size() * ((includeUsage ? kUsageSize : 0) + (includeFavorites ? 1 : 0));
     for (const auto& account : accounts) {
         size += 12 + sizeof(wchar_t) * (account.issuer.size() + account.label.size()) + account.secret.Size();
         for (const auto& tag : account.tags) {
@@ -237,6 +247,9 @@ inline bool Serialize(std::span<const Account> accounts, Plaintext& plaintext, b
         if (includeUsage) {
             WriteUnsigned(bytes, account.useCount, sizeof(account.useCount));
             WriteUnsigned(bytes, account.lastUsed, sizeof(account.lastUsed));
+        }
+        if (includeFavorites) {
+            bytes.push_back(static_cast<std::uint8_t>(account.favorite));
         }
     }
     return true;
@@ -308,11 +321,12 @@ inline std::optional<std::vector<std::uint8_t>> CreateBackup(std::span<const Acc
         return std::nullopt;
     }
     backup::Plaintext plaintext;
-    if (!backup::Serialize(accounts, plaintext)) {
+    const bool favorites = std::ranges::any_of(accounts, &Account::favorite);
+    if (!backup::Serialize(accounts, plaintext, false, false, favorites)) {
         return std::nullopt;
     }
     std::vector<std::uint8_t> bytes(backup::kHeaderSize + plaintext.bytes.size() + backup::kTagSize);
-    std::ranges::copy(backup::kMagic, bytes.begin());
+    std::ranges::copy(favorites ? backup::kFavoritesMagic : backup::kMagic, bytes.begin());
     if (BCryptGenRandom(nullptr, bytes.data() + backup::kMagic.size(),
                          backup::kSaltSize + backup::kNonceSize, BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0 ||
         !backup::EncryptOrDecrypt(true, password, bytes, plaintext)) {
@@ -327,7 +341,8 @@ inline std::optional<std::vector<Account>> LoadBackup(std::span<std::uint8_t> by
         return std::nullopt;
     }
     const auto magic = bytes.first<backup::kMagic.size()>();
-    const unsigned version = std::ranges::equal(magic, backup::kMagic) ? 3 :
+    const bool favorites = std::ranges::equal(magic, backup::kFavoritesMagic);
+    const unsigned version = favorites || std::ranges::equal(magic, backup::kMagic) ? 3 :
         std::ranges::equal(magic, backup::kTagsMagic) ? 2 :
         std::ranges::equal(magic, backup::kLegacyMagic) ? 1 : 0;
     const auto payloadSize = bytes.size() - backup::kHeaderSize - backup::kTagSize;
@@ -339,7 +354,7 @@ inline std::optional<std::vector<Account>> LoadBackup(std::span<std::uint8_t> by
     if (!backup::EncryptOrDecrypt(false, password, bytes, plaintext)) {
         return std::nullopt;
     }
-    return backup::Deserialize(plaintext.bytes, version);
+    return backup::Deserialize(plaintext.bytes, version, false, favorites);
 }
 
 enum class ExportFormat { Aegis, AndOtp };
@@ -541,7 +556,9 @@ inline std::optional<std::vector<std::uint8_t>> ReadBackup(const std::wstring& p
     DWORD read;
     if (!ReadFile(file, magic.data.data(), static_cast<DWORD>(magic.data.size()), &read, nullptr) ||
         read != magic.data.size() || (magic.data != backup::kMagic &&
-        (local ? magic.data != backup::kLocalMagic && magic.data != backup::kWindowsVaultMagic :
+        (local ? magic.data != backup::kLocalMagic && magic.data != backup::kLocalFavoritesMagic &&
+                 magic.data != backup::kWindowsVaultMagic && magic.data != backup::kWindowsFavoritesMagic :
+                 magic.data != backup::kFavoritesMagic &&
                  magic.data != backup::kTagsMagic && magic.data != backup::kLegacyMagic))) {
         CloseHandle(file);
         return std::nullopt;
@@ -697,7 +714,8 @@ public:
         std::array<std::uint8_t, backup::kWindowsVaultMagic.size()> magic{};
         DWORD bytesRead{};
         const bool windows = ReadFile(file, magic.data(), static_cast<DWORD>(magic.size()), &bytesRead, nullptr) &&
-                             bytesRead == magic.size() && magic == backup::kWindowsVaultMagic;
+                             bytesRead == magic.size() &&
+                             (magic == backup::kWindowsVaultMagic || magic == backup::kWindowsFavoritesMagic);
         CloseHandle(file);
         return windows;
     }
@@ -756,11 +774,12 @@ public:
             return std::nullopt;
         }
         const auto magic = std::span(*file).first<backup::kMagic.size()>();
-        if (std::ranges::equal(magic, backup::kWindowsVaultMagic)) {
+        const bool windowsFavorites = std::ranges::equal(magic, backup::kWindowsFavoritesMagic);
+        if (windowsFavorites || std::ranges::equal(magic, backup::kWindowsVaultMagic)) {
             if (!password.empty()) {
                 return std::nullopt;
             }
-            auto accounts = ReadWindowsVault(std::span(*file).subspan(magic.size()));
+            auto accounts = ReadWindowsVault(std::span(*file).subspan(magic.size()), windowsFavorites);
             if (accounts) {
                 lock_ = std::move(lock);
                 path_ = path;
@@ -778,7 +797,8 @@ public:
         if (!backup::DeriveKey(password, salt, derived) || !backup::EncryptOrDecrypt(false, derived, *file, payload)) {
             return std::nullopt;
         }
-        auto accounts = backup::Deserialize(payload.bytes, legacy ? 3 : 4, true);
+        auto accounts = backup::Deserialize(payload.bytes, legacy ? 3 : 4, true,
+                                            std::ranges::equal(magic, backup::kLocalFavoritesMagic));
         if (!accounts || !key_.Store(std::move(derived))) {
             return std::nullopt;
         }
@@ -825,7 +845,8 @@ private:
 
     static bool WriteWindowsVault(const std::wstring& path, std::span<const Account> accounts, bool replace) {
         backup::Plaintext payload;
-        if (!backup::Serialize(accounts, payload, true, true)) {
+        const bool favorites = std::ranges::any_of(accounts, &Account::favorite);
+        if (!backup::Serialize(accounts, payload, true, true, favorites)) {
             return false;
         }
         DATA_BLOB input{static_cast<DWORD>(payload.bytes.size()), payload.bytes.data()};
@@ -836,12 +857,13 @@ private:
         }
         SecureZeroMemory(payload.bytes.data(), payload.bytes.size());
         auto& protectedData = output.value;
-        std::vector<std::uint8_t> file(backup::kWindowsVaultMagic.begin(), backup::kWindowsVaultMagic.end());
+        const auto& magic = favorites ? backup::kWindowsFavoritesMagic : backup::kWindowsVaultMagic;
+        std::vector<std::uint8_t> file(magic.begin(), magic.end());
         file.insert(file.end(), protectedData.pbData, protectedData.pbData + protectedData.cbData);
         return WriteEncryptedFile(path, file, replace);
     }
 
-    static std::optional<std::vector<Account>> ReadWindowsVault(std::span<std::uint8_t> bytes) {
+    static std::optional<std::vector<Account>> ReadWindowsVault(std::span<std::uint8_t> bytes, bool favorites) {
         DATA_BLOB input{static_cast<DWORD>(bytes.size()), bytes.data()};
         DpapiBlob output;
         if (!CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr,
@@ -849,7 +871,7 @@ private:
             output.value.cbData > backup::kMaxLocalPayloadSize) {
             return std::nullopt;
         }
-        return backup::Deserialize({output.value.pbData, output.value.cbData}, 4, true);
+        return backup::Deserialize({output.value.pbData, output.value.cbData}, 4, true, favorites);
     }
 
     using FileLock = std::unique_ptr<void, decltype(&CloseHandle)>;
@@ -862,11 +884,12 @@ private:
 
     std::optional<std::vector<std::uint8_t>> Encrypt(std::span<const Account> accounts, SecretBytes& derived) const {
         backup::Plaintext payload;
-        if (!backup::Serialize(accounts, payload, true, true)) {
+        const bool favorites = std::ranges::any_of(accounts, &Account::favorite);
+        if (!backup::Serialize(accounts, payload, true, true, favorites)) {
             return std::nullopt;
         }
         std::vector<std::uint8_t> file(backup::kHeaderSize + payload.bytes.size() + backup::kTagSize);
-        std::ranges::copy(backup::kLocalMagic, file.begin());
+        std::ranges::copy(favorites ? backup::kLocalFavoritesMagic : backup::kLocalMagic, file.begin());
         std::ranges::copy(salt_, file.begin() + backup::kMagic.size());
         const auto nonce = std::span(file).first<backup::kHeaderSize>().last<backup::kNonceSize>();
         if (BCryptGenRandom(nullptr, nonce.data(), nonce.size(), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0 ||

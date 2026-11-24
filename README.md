@@ -23,6 +23,7 @@ Click the tray icon to open or hide the flyout. To set up a new installation, fo
 ## Use the flyout
 
 - Click an account or press **Enter** to copy its code. Codes are masked by default.
+- Search by service, account name or tag. Star accounts in edit mode or from their context menu. The footer star filters the list to favorites and remembers your choice.
 - The pencil beside Settings reveals tag filters and sorting. In the **Tags** menu, **Edit tags** opens the selected account's tags. **Most used** and **Recently used** rank successful copies.
 - To enable **Alt+O**, open **Settings > Shortcut**. You can choose another key with **Ctrl** or **Alt**, with **Shift** optional. Windows reports a conflict if the shortcut is taken.
 - Use **Settings > Backup** to export or restore an encrypted `.2fa-vault` backup.
